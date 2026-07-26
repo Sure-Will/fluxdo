@@ -90,6 +90,28 @@ class AnimatedSvgView extends StatefulWidget {
       rootGeometryOf(String svgSource) =>
           _AnimatedSvgViewState._rootGeometryOf(svgSource);
 
+  /// 释放不在组件树中的首帧 master 快照。
+  ///
+  /// 已挂载组件持有独立 clone，不受影响；后续重新进入时可从磁盘 PNG
+  /// 快照恢复。
+  static void clearMemoryCache() => _SvgFirstFrameCache.clear();
+
+  @visibleForTesting
+  static int get debugMemoryCacheBytes => _SvgFirstFrameCache.bytes;
+
+  @visibleForTesting
+  static int get debugMemoryCacheLength => _SvgFirstFrameCache.length;
+
+  @visibleForTesting
+  static void debugSetMemoryCacheByteCap(int bytes) {
+    _SvgFirstFrameCache.byteCap = bytes;
+  }
+
+  @visibleForTesting
+  static void debugPutMemoryCacheImage(int key, ui.Image image) {
+    _SvgFirstFrameCache.put(key, image);
+  }
+
   @override
   State<AnimatedSvgView> createState() => _AnimatedSvgViewState();
 }
@@ -104,6 +126,12 @@ class _SvgFirstFrameCache {
   static final Map<int, Object> _renderer = <int, Object>{};
   static final Map<int, _BumpNotifier> _notifiers = <int, _BumpNotifier>{};
   static const int _cap = 12;
+  static const int _defaultByteCap = 48 << 20;
+  static int byteCap = _defaultByteCap;
+  static int _bytes = 0;
+
+  static int get bytes => _bytes;
+  static int get length => _images.length;
 
   // 磁盘层
   static const int _diskCap = 32;
@@ -136,14 +164,34 @@ class _SvgFirstFrameCache {
 
   static void put(int key, ui.Image master) {
     _renderer.remove(key);
-    _images.remove(key)?.dispose();
+    final replaced = _images.remove(key);
+    if (replaced != null) {
+      _bytes -= _imageBytes(replaced);
+      replaced.dispose();
+    }
     _images[key] = master;
-    while (_images.length > _cap) {
+    _bytes += _imageBytes(master);
+    while (_images.length > _cap || _bytes > byteCap) {
       final evictKey = _images.keys.first;
-      _images.remove(evictKey)?.dispose();
+      final evicted = _images.remove(evictKey);
+      if (evicted != null) {
+        _bytes -= _imageBytes(evicted);
+        evicted.dispose();
+      }
     }
     _notifiers[key]?.bump();
   }
+
+  static void clear() {
+    for (final image in _images.values) {
+      image.dispose();
+    }
+    _images.clear();
+    _bytes = 0;
+    byteCap = _defaultByteCap;
+  }
+
+  static int _imageBytes(ui.Image image) => image.width * image.height * 4;
 
   static _BumpNotifier notifierFor(int key) =>
       _notifiers[key] ??= _BumpNotifier();
@@ -249,6 +297,7 @@ class _AnimatedSvgViewState extends State<AnimatedSvgView> {
   int _captureRetries = 0;
   AnimatedSvgController? _controller;
   _BumpNotifier? _waitNotifier;
+  bool _tickerModeEnabled = true;
 
   // ---- 自持播放器(见"播放控制"注释) ----
   SvgDocument? _playerDoc;
@@ -265,6 +314,28 @@ class _AnimatedSvgViewState extends State<AnimatedSvgView> {
   void initState() {
     super.initState();
     _initSource();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final enabled = TickerMode.valuesOf(context).enabled;
+    if (_tickerModeEnabled == enabled) return;
+    _tickerModeEnabled = enabled;
+    if (!enabled) {
+      _armTimer?.cancel();
+      _armTimer = null;
+      _stopPlaybackClock();
+      return;
+    }
+    if (_isPlaying) {
+      _startPlaybackClock();
+    } else if (!widget.autoPlay &&
+        _snapshot == null &&
+        !_electArmed &&
+        !_offscreenRunning) {
+      _scheduleArm(const Duration(milliseconds: 300));
+    }
   }
 
   void _initSource() {
@@ -585,6 +656,11 @@ class _AnimatedSvgViewState extends State<AnimatedSvgView> {
 
   void _startPlaybackClock() {
     _playTimer?.cancel();
+    _playTimer = null;
+    if (!_tickerModeEnabled) {
+      _playClock.stop();
+      return;
+    }
     _playTimer = Timer.periodic(
       Duration(milliseconds: (1000 / _playbackFps).round()),
       (_) {
