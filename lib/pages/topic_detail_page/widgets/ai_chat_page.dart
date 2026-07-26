@@ -6,6 +6,7 @@ import 'package:m3e_ui/m3e_ui.dart';
 
 import 'package:ai_model_manager/ai_model_manager.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:app_icons/app_icons.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -62,6 +63,15 @@ class AiChatPage extends ConsumerStatefulWidget {
 }
 
 class _AiChatPageState extends ConsumerState<AiChatPage> {
+  static const _latestScrollThreshold = 48.0;
+
+  final ScrollController _messageScrollController = ScrollController();
+  bool _followLatestMessage = true;
+  bool _latestScrollScheduled = false;
+  bool _animateNextLatestScroll = false;
+  int _latestScrollPassesRemaining = 0;
+  String? _observedSessionId;
+
   /// 已获取到的上下文帖子（按 postNumber 升序）
   final List<TopicPostContext> _contextPosts = [];
 
@@ -77,6 +87,12 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
   /// 多选模式
   bool _selectionMode = false;
   final Set<String> _selectedMessageIds = {};
+
+  @override
+  void dispose() {
+    _messageScrollController.dispose();
+    super.dispose();
+  }
 
   @override
   void didUpdateWidget(AiChatPage oldWidget) {
@@ -414,6 +430,98 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
     });
   }
 
+  void _syncMessageListScroll(TopicAiChatState chatState) {
+    if (_observedSessionId != chatState.currentSessionId) {
+      _observedSessionId = chatState.currentSessionId;
+      _followLatestMessage = true;
+    }
+    if (_followLatestMessage && chatState.messages.isNotEmpty) {
+      _scheduleScrollToLatest();
+    }
+  }
+
+  void _scheduleScrollToLatest({bool animate = false, int settlePasses = 3}) {
+    _animateNextLatestScroll |= animate;
+    if (_latestScrollPassesRemaining < settlePasses) {
+      _latestScrollPassesRemaining = settlePasses;
+    }
+    if (_latestScrollScheduled) return;
+    _latestScrollScheduled = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _latestScrollScheduled = false;
+      final shouldAnimate = _animateNextLatestScroll;
+      _animateNextLatestScroll = false;
+      if (!mounted ||
+          !_followLatestMessage ||
+          !_messageScrollController.hasClients) {
+        _latestScrollPassesRemaining = 0;
+        return;
+      }
+
+      final position = _messageScrollController.position;
+      final target = position.maxScrollExtent;
+      if ((position.pixels - target).abs() <= 1) {
+        _latestScrollPassesRemaining = 0;
+        return;
+      }
+
+      if (shouldAnimate) {
+        _latestScrollPassesRemaining = 0;
+        _messageScrollController
+            .animateTo(
+              target,
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+            )
+            .whenComplete(() {
+              if (mounted && _followLatestMessage) {
+                _scheduleScrollToLatest(settlePasses: 2);
+              }
+            });
+      } else {
+        // 流式内容每帧都可能变高，直接跟随可避免动画队列累积和抖动。
+        _messageScrollController.jumpTo(target);
+        _latestScrollPassesRemaining--;
+        // ListView 是懒布局，首次跳到底部后 maxScrollExtent 可能在下一帧
+        // 继续校正；最多再收敛两次，避免历史会话停在最新消息上方。
+        if (_latestScrollPassesRemaining > 0) {
+          _scheduleScrollToLatest(settlePasses: 0);
+        }
+      }
+    });
+  }
+
+  void _resumeFollowingLatest() {
+    if (!_followLatestMessage) {
+      setState(() => _followLatestMessage = true);
+    }
+    _scheduleScrollToLatest(animate: true);
+  }
+
+  bool _handleMessageScrollNotification(ScrollNotification notification) {
+    if (notification.depth != 0) return false;
+
+    if (notification is UserScrollNotification) {
+      if (notification.direction == ScrollDirection.forward) {
+        // 用户主动向旧消息方向滚动，立即交还控制权。
+        if (_followLatestMessage) {
+          setState(() => _followLatestMessage = false);
+        }
+      } else if (notification.metrics.extentAfter <= _latestScrollThreshold) {
+        if (!_followLatestMessage) {
+          setState(() => _followLatestMessage = true);
+        }
+      }
+    } else if (notification is ScrollEndNotification &&
+        notification.metrics.extentAfter <= _latestScrollThreshold &&
+        !_followLatestMessage) {
+      setState(() => _followLatestMessage = true);
+    }
+
+    return false;
+  }
+
   /// 导出选中的消息为图片
   void _exportSelectedMessages() {
     final chatState = ref.read(topicAiChatProvider(widget.topicId));
@@ -522,6 +630,7 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
     final theme = Theme.of(context);
     final chatState = ref.watch(topicAiChatProvider(widget.topicId));
     final chatNotifier = ref.read(topicAiChatProvider(widget.topicId).notifier);
+    _syncMessageListScroll(chatState);
 
     // 首次 build 且有 detail 时加载上下文
     if (widget.detail != null && _lastLoadedScope == null) {
@@ -828,6 +937,7 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
                 );
                 final model = _currentModel();
                 if (model == null) return;
+                _resumeFollowingLatest();
                 _rememberModel(model);
                 chatNotifier.sendMessage(
                   content,
@@ -880,6 +990,7 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
     final scope = ref.read(topicAiContextScopeProvider(widget.topicId));
     final model = _currentModel();
     if (model == null) return;
+    _resumeFollowingLatest();
     _rememberModel(model);
     ref
         .read(topicAiChatProvider(widget.topicId).notifier)
@@ -994,56 +1105,82 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
     TopicAiChatState chatState,
   ) {
     final messages = chatState.messages;
-    return ListView.builder(
-      reverse: true,
-      padding: const EdgeInsets.symmetric(vertical: 8),
-      itemCount: messages.length,
-      itemBuilder: (context, index) {
-        final message = messages[messages.length - 1 - index];
-        return AiChatMessageItem(
-          message: message,
-          onRetry: message.status == MessageStatus.error
-              ? () {
-                  final scope = ref.read(
-                    topicAiContextScopeProvider(widget.topicId),
-                  );
-                  final model = _currentModel();
-                  if (model == null) return;
-                  _rememberModel(model);
-                  ref
-                      .read(topicAiChatProvider(widget.topicId).notifier)
-                      .retryLastMessage(
-                        scope,
-                        selectedModel: model,
-                        // 透传当前 thinking 配置,否则重试会用 ThinkingConfig.off
-                        // 默认值,跟原请求不一致(用户感觉「重试就好」其实是
-                        // thinking 被静默关掉了,不是上游恢复)。
-                        thinkingConfig: ref.read(aiThinkingConfigProvider),
-                      );
-                }
-              : null,
-          onShareAsImage:
-              message.status == MessageStatus.completed &&
-                  message.content.isNotEmpty
-              ? () => _shareMessageAsImage(message)
-              : null,
-          onCopyText:
-              message.status == MessageStatus.completed &&
-                  message.content.isNotEmpty
-              ? () => _copyMessageText(message)
-              : null,
-          onReplyImage:
-              widget.onReplyToTopic != null &&
-                  message.status == MessageStatus.completed
-              ? (att) => _replyImageToTopic(att)
-              : null,
-          selectionMode: _selectionMode,
-          isSelected: _selectedMessageIds.contains(message.id),
-          onSelectionToggle: _selectionMode
-              ? () => _toggleMessageSelection(message.id)
-              : null,
-        );
-      },
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: NotificationListener<ScrollNotification>(
+            onNotification: _handleMessageScrollNotification,
+            child: ListView.builder(
+              key: const ValueKey('ai_chat_message_list'),
+              controller: _messageScrollController,
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              itemCount: messages.length,
+              itemBuilder: (context, index) {
+                final message = messages[index];
+                return AiChatMessageItem(
+                  message: message,
+                  onRetry: message.status == MessageStatus.error
+                      ? () {
+                          final scope = ref.read(
+                            topicAiContextScopeProvider(widget.topicId),
+                          );
+                          final model = _currentModel();
+                          if (model == null) return;
+                          _resumeFollowingLatest();
+                          _rememberModel(model);
+                          ref
+                              .read(
+                                topicAiChatProvider(widget.topicId).notifier,
+                              )
+                              .retryLastMessage(
+                                scope,
+                                selectedModel: model,
+                                // 透传当前 thinking 配置,否则重试会用 ThinkingConfig.off
+                                // 默认值,跟原请求不一致(用户感觉「重试就好」其实是
+                                // thinking 被静默关掉了,不是上游恢复)。
+                                thinkingConfig: ref.read(
+                                  aiThinkingConfigProvider,
+                                ),
+                              );
+                        }
+                      : null,
+                  onShareAsImage:
+                      message.status == MessageStatus.completed &&
+                          message.content.isNotEmpty
+                      ? () => _shareMessageAsImage(message)
+                      : null,
+                  onCopyText:
+                      message.status == MessageStatus.completed &&
+                          message.content.isNotEmpty
+                      ? () => _copyMessageText(message)
+                      : null,
+                  onReplyImage:
+                      widget.onReplyToTopic != null &&
+                          message.status == MessageStatus.completed
+                      ? (att) => _replyImageToTopic(att)
+                      : null,
+                  selectionMode: _selectionMode,
+                  isSelected: _selectedMessageIds.contains(message.id),
+                  onSelectionToggle: _selectionMode
+                      ? () => _toggleMessageSelection(message.id)
+                      : null,
+                );
+              },
+            ),
+          ),
+        ),
+        if (!_followLatestMessage)
+          Positioned(
+            right: 16,
+            bottom: 12,
+            child: IconButton.filledTonal(
+              key: const ValueKey('ai_chat_scroll_to_latest'),
+              onPressed: _resumeFollowingLatest,
+              icon: const Icon(Symbols.arrow_downward_rounded),
+              tooltip: context.l10n.topic_filterLatest,
+            ),
+          ),
+      ],
     );
   }
 

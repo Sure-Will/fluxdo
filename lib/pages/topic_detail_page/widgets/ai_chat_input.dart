@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:ai_model_manager/ai_model_manager.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:app_icons/app_icons.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../l10n/s.dart';
@@ -80,12 +81,36 @@ class _AiChatInputState extends State<AiChatInput> {
   }
 
   void _handleSend() {
+    if (widget.isGenerating) return;
     final text = _controller.text.trim();
     if (text.isEmpty && _pendingAttachments.isEmpty) return;
     final attachments = List<AiChatAttachment>.unmodifiable(_pendingAttachments);
     widget.onSend(text, attachments);
     _controller.clear();
     setState(_pendingAttachments.clear);
+  }
+
+  KeyEventResult _handleInputKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+    final isEnter =
+        event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter;
+    if (!isEnter || HardwareKeyboard.instance.isShiftPressed) {
+      return KeyEventResult.ignored;
+    }
+
+    // 中文等输入法正在组合候选词时，Enter 应交给输入法确认候选，不能发送。
+    final composing = _controller.value.composing;
+    if (composing.isValid && !composing.isCollapsed) {
+      return KeyEventResult.ignored;
+    }
+
+    // 普通 Enter 的语义始终是发送；不可发送时也不插入空行。
+    if (!widget.isGenerating && _canSend) {
+      _handleSend();
+    }
+    return KeyEventResult.handled;
   }
 
   Future<void> _pickImage(ImageSource source) async {
@@ -163,40 +188,43 @@ class _AiChatInputState extends State<AiChatInput> {
             const SizedBox(height: 6),
           ],
           // 输入框
-          TextField(
-            controller: _controller,
-            focusNode: _focusNode,
-            maxLines: 5,
-            minLines: 1,
-            textInputAction: TextInputAction.newline,
-            decoration: InputDecoration(
-              hintText: context.l10n.ai_inputHint,
-              hintStyle: TextStyle(
-                color: theme.colorScheme.onSurfaceVariant
-                    .withValues(alpha: 0.5),
+          Focus(
+            onKeyEvent: _handleInputKeyEvent,
+            child: TextField(
+              controller: _controller,
+              focusNode: _focusNode,
+              maxLines: 5,
+              minLines: 1,
+              textInputAction: TextInputAction.newline,
+              decoration: InputDecoration(
+                hintText: context.l10n.ai_inputHint,
+                hintStyle: TextStyle(
+                  color: theme.colorScheme.onSurfaceVariant
+                      .withValues(alpha: 0.5),
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(20),
+                  borderSide: BorderSide.none,
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(20),
+                  borderSide: BorderSide.none,
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(20),
+                  borderSide: BorderSide.none,
+                ),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 10,
+                ),
+                isDense: true,
+                filled: true,
+                fillColor: theme.colorScheme.surface,
+                hoverColor: Colors.transparent,
               ),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(20),
-                borderSide: BorderSide.none,
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(20),
-                borderSide: BorderSide.none,
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(20),
-                borderSide: BorderSide.none,
-              ),
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 16,
-                vertical: 10,
-              ),
-              isDense: true,
-              filled: true,
-              fillColor: theme.colorScheme.surface,
-              hoverColor: Colors.transparent,
+              onChanged: (_) => setState(() {}),
             ),
-            onChanged: (_) => setState(() {}),
           ),
           const SizedBox(height: 4),
           // 底部栏：左侧模型 logo 按钮，右侧 [+] [发送/停止]

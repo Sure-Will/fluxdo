@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // ignore: depend_on_referenced_packages
 import 'package:flutter_riverpod/legacy.dart';
@@ -176,6 +177,8 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
   static const FlutterSecureStorage _legacyKeychain = FlutterSecureStorage(
     mOptions: MacOsOptions(usesDataProtectionKeychain: false),
   );
+  static bool get _canAccessLegacyKeychain =>
+      kIsWeb || defaultTargetPlatform != TargetPlatform.macOS;
 
   final SharedPreferences _prefs;
 
@@ -315,7 +318,9 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
     pinnedItems.insert(newIndex, moved);
     final otherItems =
         state.where((provider) => provider.pinned != pinned).toList();
-    state = pinned ? [...pinnedItems, ...otherItems] : [...otherItems, ...pinnedItems];
+    state = pinned
+        ? [...pinnedItems, ...otherItems]
+        : [...otherItems, ...pinnedItems];
     await _save();
   }
 
@@ -348,15 +353,17 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
     SharedPreferences prefs,
   ) async {
     String? value;
-    try {
-      final fromKeychain = await _legacyKeychain.read(
-        key: '$_kLegacyKeychainPrefix$providerId',
-      );
-      if (fromKeychain != null && fromKeychain.trim().isNotEmpty) {
-        value = fromKeychain.trim();
+    if (_canAccessLegacyKeychain) {
+      try {
+        final fromKeychain = await _legacyKeychain.read(
+          key: '$_kLegacyKeychainPrefix$providerId',
+        );
+        if (fromKeychain != null && fromKeychain.trim().isNotEmpty) {
+          value = fromKeychain.trim();
+        }
+      } catch (_) {
+        // Keychain 读失败(自签失效 / Linux 无 keyring)→ 看 prefs fallback
       }
-    } catch (_) {
-      // Keychain 读失败(自签失效 / mac 未签名 / Linux 无 keyring)→ 看 prefs fallback
     }
     if (value == null) {
       final fromFallback = prefs.getString(
@@ -370,10 +377,12 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
 
     await prefs.setString('$_kApiKeyPrefix$providerId', value);
     await prefs.remove('$_kLegacyFallbackPrefix$providerId');
-    try {
-      await _legacyKeychain.delete(key: '$_kLegacyKeychainPrefix$providerId');
-    } catch (_) {
-      // 删失败无所谓,新位置已经存了,下次不会再走迁移分支
+    if (_canAccessLegacyKeychain) {
+      try {
+        await _legacyKeychain.delete(key: '$_kLegacyKeychainPrefix$providerId');
+      } catch (_) {
+        // 删失败无所谓,新位置已经存了,下次不会再走迁移分支
+      }
     }
     return value;
   }
@@ -395,17 +404,21 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
     await prefs.setString('$_kApiKeyPrefix$providerId', trimmed);
     // 顺便清掉老位置,避免新老两份 apiKey 共存导致迁移逻辑下次还跑
     await prefs.remove('$_kLegacyFallbackPrefix$providerId');
-    try {
-      await _legacyKeychain.delete(key: '$_kLegacyKeychainPrefix$providerId');
-    } catch (_) {}
+    if (_canAccessLegacyKeychain) {
+      try {
+        await _legacyKeychain.delete(key: '$_kLegacyKeychainPrefix$providerId');
+      } catch (_) {}
+    }
   }
 
   static Future<void> _deleteApiKey(String providerId) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove('$_kApiKeyPrefix$providerId');
     await prefs.remove('$_kLegacyFallbackPrefix$providerId');
-    try {
-      await _legacyKeychain.delete(key: '$_kLegacyKeychainPrefix$providerId');
-    } catch (_) {}
+    if (_canAccessLegacyKeychain) {
+      try {
+        await _legacyKeychain.delete(key: '$_kLegacyKeychainPrefix$providerId');
+      } catch (_) {}
+    }
   }
 }

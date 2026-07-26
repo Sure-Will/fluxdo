@@ -74,10 +74,12 @@ import 'services/user_presence_service.dart';
 import 'models/user.dart';
 import 'constants.dart';
 import 'providers/connectivity_provider.dart';
+import 'utils/app_memory_policy.dart';
 import 'utils/dialog_utils.dart';
 import 'utils/frame_jank_monitor.dart';
 import 'utils/image_decode_gate.dart';
 import 'widgets/post/post_item/render_parse_cache.dart';
+import 'widgets/content/animated_svg_view.dart';
 import 'utils/scroll_busy_signal.dart';
 import 'utils/time_utils.dart';
 
@@ -200,13 +202,18 @@ Future<void> main() async {
   // 100-300 张)+ Discourse 自带几千个 emoji + 头像 + 贴内图,加起来很容易
   // 超过 5000 项,触发 LRU evict 后滚回去就要重新解码,用户感知卡顿。
   //
-  // 256 MB / 30000 项:emoji thumbnail(64px)~16 KB、sticker thumbnail
-  // (160px)~100 KB,256 MB 足够装下"全部 emoji + 几个 sticker group +
-  // 当前贴图"。之前调过 800 MB,但中端 Android 机上内存压力换来系统级
-  // GC / LMK 卡顿,得不偿失 —— 磁盘 PNG 缩略图缓存命中本来就是毫秒级,
-  // evict 的重解成本远比内存压力的代价低。
-  PaintingBinding.instance.imageCache.maximumSizeBytes = 256 * 1024 * 1024;
-  PaintingBinding.instance.imageCache.maximumSize = 30000;
+  // 移动端保留 256 MB / 30000 项的既有取舍；macOS 进程还会为同一批
+  // 解码图持有 GPU texture / IOSurface，物理占用会明显高于 Dart 侧账面，
+  // 因此收紧为 128 MB / 4096 项。磁盘 PNG/blob 缩略图缓存仍在，淘汰后
+  // 不需要重新下载。
+  final imageCacheLimits = AppMemoryPolicy.imageCacheLimits(
+    platform: defaultTargetPlatform,
+    isWeb: kIsWeb,
+  );
+  PaintingBinding.instance.imageCache.maximumSizeBytes =
+      imageCacheLimits.maximumBytes;
+  PaintingBinding.instance.imageCache.maximumSize =
+      imageCacheLimits.maximumEntries;
 
   // 启用 Edge-to-Edge 模式（小白条沉浸式）
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -820,12 +827,15 @@ class _MainPageState extends ConsumerState<MainPage>
   List<NavEntry> _lastResolvedEntries = const [];
   Timer? _resumeDebounceTimer;
   DateTime? _lastBackPressTime;
+  late AppLifecycleState _appLifecycleState;
 
   // 不能是 const，需要传入 isActive
 
   @override
   void initState() {
     super.initState();
+    _appLifecycleState =
+        WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
     WidgetsBinding.instance.addObserver(this);
     UserPresenceService().setForeground(true, countAsActivity: true);
     HardwareKeyboard.instance.addHandler(_handlePresenceKeyEvent);
@@ -1093,6 +1103,10 @@ class _MainPageState extends ConsumerState<MainPage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
 
+    if (_appLifecycleState != state && mounted) {
+      setState(() => _appLifecycleState = state);
+    }
+
     if (state == AppLifecycleState.resumed) {
       UserPresenceService().setForeground(true, countAsActivity: true);
     } else if (state == AppLifecycleState.inactive ||
@@ -1125,7 +1139,7 @@ class _MainPageState extends ConsumerState<MainPage>
     super.didHaveMemoryPressure();
     // 系统内存压力统一入口:iOS 内存警告 / Android onTrimMemory /
     // 金标联盟公平运行内存 TRIM 广播(FairMemoryReceiver 翻译成同一
-    // memoryPressure 通道)。imageCache(最大头,256MB 上限)由框架
+    // memoryPressure 通道)。imageCache(平台预算内的最大头)由框架
     // PaintingBinding.handleMemoryPressure 自清,这里补自建缓存:
     // - RenderParseCache:纯数据,清空安全;
     // - FlattenCache:引用计数设计,在用条目标 dead 延迟释放,安全;
@@ -1134,10 +1148,11 @@ class _MainPageState extends ConsumerState<MainPage>
     //   仅 reassemble 全量重建场景安全),且量级仅数 MB 不值得冒险。
     RenderParseCache.clear();
     FlattenCache.evictAll();
+    AnimatedSvgView.clearMemoryCache();
     // 公平内存机制下持续增长会触达查杀线,先把监控现场落盘(未启用
     // 或无记录时内部直接返回,静默失败)。
     unawaited(FrameJankMonitor.persistSnapshot());
-    debugPrint('[MainPage] 内存压力:已清理解析/flatten 缓存');
+    debugPrint('[MainPage] 内存压力:已清理解析/flatten/SVG 缓存');
   }
 
   Future<void> _resumeFromBackground() async {
@@ -1229,6 +1244,7 @@ class _MainPageState extends ConsumerState<MainPage>
   Future<void> _enterBackground() async {
     // 清除 Flutter 图片内存缓存，降低后台内存占用
     PaintingBinding.instance.imageCache.clear();
+    AnimatedSvgView.clearMemoryCache();
 
     // 诊断快照落盘:进程随后被杀时环形缓冲现场不再全丢(监控未启用
     // 或无记录时内部直接返回;静默失败,不干扰退后台路径)
@@ -1406,9 +1422,16 @@ class _MainPageState extends ConsumerState<MainPage>
           index: safePageIndex,
           children: [
             for (int i = 0; i < pageEntries.length; i++)
-              KeyedSubtree(
-                key: ValueKey('nav-entry-${pageEntries[i].id}'),
-                child: pageEntries[i].pageBuilder!(context, safePageIndex == i),
+              AppPageTickerGate(
+                lifecycleState: _appLifecycleState,
+                isActivePage: safePageIndex == i,
+                child: KeyedSubtree(
+                  key: ValueKey('nav-entry-${pageEntries[i].id}'),
+                  child: pageEntries[i].pageBuilder!(
+                    context,
+                    safePageIndex == i,
+                  ),
+                ),
               ),
           ],
         ),
