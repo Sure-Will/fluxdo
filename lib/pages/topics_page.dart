@@ -3224,15 +3224,18 @@ class _TopicListState extends ConsumerState<_TopicList>
                   try {
                     // 对齐网页版 showInserted：按 topic_ids 增量加载并插入顶部
                     final incomingState = ref.read(latestChannelProvider);
+                    final incomingSnapshot = incomingState
+                        .incomingRevisionSnapshotForCategory(providerKey);
                     final topicIds = incomingState.incomingTopicIdsForCategory(
                       providerKey,
+                      limit: TopicListIncomingState.maxRefreshCount,
                     );
                     final insertedIds = await ref
                         .read(topicListProvider(providerKey).notifier)
                         .loadBefore(topicIds);
                     ref
                         .read(latestChannelProvider.notifier)
-                        .clearIncoming(topicIds);
+                        .clearIncomingSnapshot(incomingSnapshot);
 
                     if (mounted && insertedIds.isNotEmpty) {
                       // 标记插入的话题以显示高亮动画
@@ -3249,6 +3252,9 @@ class _TopicListState extends ConsumerState<_TopicList>
                       });
                       scrollToTop();
                     }
+                  } catch (e) {
+                    debugPrint('[TopicList] 增量刷新失败: $e');
+                    ToastService.showError(S.current.common_loadFailedRetry);
                   } finally {
                     if (mounted) {
                       setState(() {

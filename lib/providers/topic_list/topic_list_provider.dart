@@ -213,22 +213,17 @@ class TopicListNotifier extends AsyncNotifier<List<Topic>>
     final currentTopics = state.value;
     if (currentTopics == null) return [];
 
-    try {
-      final service = ref.read(discourseServiceProvider);
-      final response = await service.getTopicsByIds(topicIds);
-      final newTopics = response.topics;
-      if (newTopics.isEmpty) return [];
+    final service = ref.read(discourseServiceProvider);
+    final response = await service.getTopicsByIds(topicIds);
+    final newTopics = response.topics;
+    if (newTopics.isEmpty) return [];
 
-      // 移除列表中已存在的同 ID 话题（刷新重复项，与网页版 removeValuesFromArray 一致）
-      final newTopicIds = newTopics.map((t) => t.id).toSet();
-      final remaining = currentTopics.where((t) => !newTopicIds.contains(t.id)).toList();
-      // 将新话题全部插入列表顶部
-      state = AsyncValue.data([...newTopics, ...remaining]);
-      return newTopics.map((t) => t.id).toList();
-    } catch (e) {
-      debugPrint('[TopicList] loadBefore 失败: $e');
-      return [];
-    }
+    // 移除列表中已存在的同 ID 话题（刷新重复项，与网页版 removeValuesFromArray 一致）
+    final newTopicIds = newTopics.map((t) => t.id).toSet();
+    final remaining = currentTopics.where((t) => !newTopicIds.contains(t.id)).toList();
+    // 将新话题全部插入列表顶部
+    state = AsyncValue.data([...newTopics, ...remaining]);
+    return newTopics.map((t) => t.id).toList();
   }
 
   /// 加载更多

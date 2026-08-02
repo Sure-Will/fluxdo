@@ -19,10 +19,10 @@ final topicTrackingStateMetaProvider = FutureProvider<Map<String, dynamic>?>((re
 /// 单个话题的追踪状态
 class TrackedTopicState {
   final int topicId;
-  final int? lastReadPostNumber;  // null = 未读过（NEW）
+  final int? lastReadPostNumber; // null = 未读过（NEW）
   final int highestPostNumber;
   final int? categoryId;
-  final int notificationLevel;  // 0=MUTED, 1=REGULAR, 2=TRACKING, 3=WATCHING
+  final int notificationLevel; // 0=MUTED, 1=REGULAR, 2=TRACKING, 3=WATCHING
   final bool createdInNewPeriod;
   final bool isSeen;
 
@@ -119,14 +119,14 @@ class TopicTrackingStateNotifier extends Notifier<Map<int, TrackedTopicState>> {
     _loadingPreloadedStates = true;
     unawaited(
       preloaded.getTopicTrackingStates().then((states) {
-        _loadingPreloadedStates = false;
-        if (!ref.mounted || states == null) return;
-        final loaded = _buildPreloadedStateMap(states);
-        state = state.isEmpty ? loaded : {...loaded, ...state};
+            _loadingPreloadedStates = false;
+            if (!ref.mounted || states == null) return;
+            final loaded = _buildPreloadedStateMap(states);
+            state = state.isEmpty ? loaded : {...loaded, ...state};
       }).catchError((Object e, StackTrace st) {
-        _loadingPreloadedStates = false;
-        debugPrint('[TopicTrackingState] 异步加载预加载追踪状态失败: $e');
-      }),
+            _loadingPreloadedStates = false;
+            debugPrint('[TopicTrackingState] 异步加载预加载追踪状态失败: $e');
+          }),
     );
   }
 
@@ -336,20 +336,20 @@ class TopicTrackingStateNotifier extends Notifier<Map<int, TrackedTopicState>> {
 
 final topicTrackingStateProvider =
     NotifierProvider<TopicTrackingStateNotifier, Map<int, TrackedTopicState>>(
-  TopicTrackingStateNotifier.new,
-);
+      TopicTrackingStateNotifier.new,
+    );
 
 /// MessageBus 初始化 Notifier
 /// 统一管理所有频道的批量订阅，避免串行等待
 class MessageBusInitNotifier extends Notifier<void> {
   final Map<String, MessageBusCallback> _allCallbacks = {};
-  
+
   @override
   void build() {
     final messageBus = ref.watch(messageBusServiceProvider);
     final currentUser = ref.watch(currentUserProvider).value;
     final metaAsync = ref.watch(topicTrackingStateMetaProvider);
-    
+
     // 清理之前的订阅
     if (_allCallbacks.isNotEmpty) {
       debugPrint('[MessageBusInit] 清理旧订阅: ${_allCallbacks.keys}');
@@ -358,7 +358,7 @@ class MessageBusInitNotifier extends Notifier<void> {
       }
       _allCallbacks.clear();
     }
-    
+
     // 对齐 Discourse：long_polling_base_url 对匿名和登录用户都生效，
     // sharedSessionKey 仅在登录且跨域长轮询时存在。
     final preloaded = PreloadedDataService();
@@ -383,7 +383,7 @@ class MessageBusInitNotifier extends Notifier<void> {
       debugPrint('[MessageBusInit] topicTrackingStateMeta 未加载');
       return;
     }
-    
+
     // 逐个订阅话题追踪频道
     // 注意: /notification/ 和 /notification-alert/ 频道由专门的
     // NotificationChannelNotifier 和 NotificationAlertChannelNotifier 管理，
@@ -402,7 +402,7 @@ class MessageBusInitNotifier extends Notifier<void> {
       _allCallbacks[channel] = onTopicTracking;
       messageBus.subscribeWithMessageId(channel, onTopicTracking, messageId);
     }
-    
+
     ref.onDispose(() {
       debugPrint('[MessageBusInit] 取消所有订阅: ${_allCallbacks.keys}');
       for (final entry in _allCallbacks.entries) {
@@ -419,10 +419,24 @@ final messageBusInitProvider = NotifierProvider<MessageBusInitNotifier, void>(
 
 /// 话题列表新消息状态（按分类隔离）
 class TopicListIncomingState {
+  /// 单次增量刷新上限。长期未打开应用时只保留最近一批更新，避免把上千个
+  /// topic ID 拼进同一个 GET 查询参数导致请求超时或被代理拒绝。
+  static const maxRefreshCount = 50;
+
   /// topicId → categoryId 的映射，用于按 tab/分类隔离新话题指示器
   final Map<int, int?> incomingTopics;
 
-  const TopicListIncomingState({this.incomingTopics = const {}});
+  /// topicId → 最近一次 MessageBus 事件序号。用于刷新请求返回时只清除
+  /// 请求开始前的事件，避免把请求途中到达的同 topic 更新一起清掉。
+  final Map<int, int> incomingRevisions;
+
+  final int revision;
+
+  const TopicListIncomingState({
+    this.incomingTopics = const {},
+    this.incomingRevisions = const {},
+    this.revision = 0,
+  });
 
   bool get hasIncoming => incomingTopics.isNotEmpty;
   int get incomingCount => incomingTopics.length;
@@ -439,13 +453,58 @@ class TopicListIncomingState {
     return incomingTopics.values.where((c) => c == categoryId).length;
   }
 
-  /// 获取指定分类的 incoming topic IDs（null 表示全部）
-  List<int> incomingTopicIdsForCategory(int? categoryId) {
-    if (categoryId == null) return incomingTopics.keys.toList();
-    return incomingTopics.entries
-        .where((e) => e.value == categoryId)
-        .map((e) => e.key)
-        .toList();
+  /// 获取指定分类的 incoming topic IDs（null 表示全部）。
+  ///
+  /// [limit] 存在时保留最新收到的 ID；[incomingTopics] 为插入有序 Map。
+  List<int> incomingTopicIdsForCategory(int? categoryId, {int? limit}) {
+    final ids = categoryId == null
+        ? incomingTopics.keys.toList()
+        : incomingTopics.entries
+              .where((e) => e.value == categoryId)
+              .map((e) => e.key)
+              .toList();
+    if (limit == null || ids.length <= limit) return ids;
+    return ids.sublist(ids.length - limit);
+  }
+
+  /// 记录一次 incoming；重复 topic 会移到末尾，因此截断时按最近事件排序。
+  TopicListIncomingState recordIncoming(int topicId, int? categoryId) {
+    final nextRevision = revision + 1;
+    final resolvedCategoryId = categoryId ?? incomingTopics[topicId];
+    final topics = Map<int, int?>.from(incomingTopics)
+      ..remove(topicId)
+      ..[topicId] = resolvedCategoryId;
+    final revisions = Map<int, int>.from(incomingRevisions)
+      ..remove(topicId)
+      ..[topicId] = nextRevision;
+    return TopicListIncomingState(
+      incomingTopics: topics,
+      incomingRevisions: revisions,
+      revision: nextRevision,
+    );
+  }
+
+  /// 捕获当前分类的事件版本。请求成功后以此为条件清理，保留在途期间
+  /// 新到达或再次更新的 topic。
+  Map<int, int> incomingRevisionSnapshotForCategory(int? categoryId) {
+    final ids = incomingTopicIdsForCategory(categoryId);
+    return {for (final id in ids) id: incomingRevisions[id] ?? 0};
+  }
+
+  /// 应用一次刷新快照：只移除从快照后未再次收到更新的 topic。
+  TopicListIncomingState clearSnapshot(Map<int, int> snapshot) {
+    final topics = Map<int, int?>.from(incomingTopics);
+    final revisions = Map<int, int>.from(incomingRevisions);
+    for (final entry in snapshot.entries) {
+      if (revisions[entry.key] != entry.value) continue;
+      topics.remove(entry.key);
+      revisions.remove(entry.key);
+    }
+    return TopicListIncomingState(
+      incomingTopics: topics,
+      incomingRevisions: revisions,
+      revision: revision,
+    );
   }
 }
 
@@ -491,9 +550,6 @@ class LatestChannelNotifier extends Notifier<TopicListIncomingState> {
       // 仅处理 latest（话题更新）和 new_topic（新话题创建）两种类型
       if (messageType != 'latest' && messageType != 'new_topic') return;
 
-      // 同一 topic_id 去重（与网页版 _addIncoming 一致）
-      if (state.incomingTopics.containsKey(topicId)) return;
-
       // 提取话题分类 ID（用于按 tab 隔离和静音过滤）
       final payload = data['payload'] as Map<String, dynamic>?;
       final topicCategoryId = payload?['category_id'] as int?;
@@ -511,9 +567,7 @@ class LatestChannelNotifier extends Notifier<TopicListIncomingState> {
       // 通知 + 下游两次重建;滚动中即"帧开工晚"型掉帧的税源之一)
 
       // 即时更新（与网页版一致，无防抖）
-      state = TopicListIncomingState(
-        incomingTopics: {...state.incomingTopics, topicId: topicCategoryId},
-      );
+      state = state.recordIncoming(topicId, topicCategoryId);
     }
 
     // 订阅 /latest 频道（话题更新）
@@ -535,17 +589,37 @@ class LatestChannelNotifier extends Notifier<TopicListIncomingState> {
     final remaining = Map<int, int?>.from(state.incomingTopics)
       ..removeWhere((id, _) => toRemove.contains(id));
     if (remaining.length == state.incomingTopics.length) return;
-    state = TopicListIncomingState(incomingTopics: remaining);
+    final remainingRevisions = Map<int, int>.from(state.incomingRevisions)
+      ..removeWhere((id, _) => toRemove.contains(id));
+    state = TopicListIncomingState(
+      incomingTopics: remaining,
+      incomingRevisions: remainingRevisions,
+      revision: state.revision,
+    );
+  }
+
+  /// 仅清除仍与请求开始时版本一致的 incoming。
+  void clearIncomingSnapshot(Map<int, int> snapshot) {
+    final nextState = state.clearSnapshot(snapshot);
+    if (nextState.incomingTopics.length == state.incomingTopics.length) return;
+    state = nextState;
   }
 
   /// 清除指定分类的新话题标记（null 表示清除全部）
   void clearNewTopicsForCategory(int? categoryId) {
     if (categoryId == null) {
-      state = const TopicListIncomingState();
+      state = TopicListIncomingState(revision: state.revision);
     } else {
       final remaining = Map<int, int?>.from(state.incomingTopics)
         ..removeWhere((_, c) => c == categoryId);
-      state = TopicListIncomingState(incomingTopics: remaining);
+      final remainingIds = remaining.keys.toSet();
+      final remainingRevisions = Map<int, int>.from(state.incomingRevisions)
+        ..removeWhere((id, _) => !remainingIds.contains(id));
+      state = TopicListIncomingState(
+        incomingTopics: remaining,
+        incomingRevisions: remainingRevisions,
+        revision: state.revision,
+      );
     }
   }
 }
