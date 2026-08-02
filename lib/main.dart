@@ -75,6 +75,7 @@ import 'models/user.dart';
 import 'constants.dart';
 import 'providers/connectivity_provider.dart';
 import 'utils/app_memory_policy.dart';
+import 'utils/animation_memory_lifecycle.dart';
 import 'utils/dialog_utils.dart';
 import 'utils/frame_jank_monitor.dart';
 import 'utils/image_decode_gate.dart';
@@ -828,6 +829,7 @@ class _MainPageState extends ConsumerState<MainPage>
   Timer? _resumeDebounceTimer;
   DateTime? _lastBackPressTime;
   late AppLifecycleState _appLifecycleState;
+  late final AnimationMemoryLifecycle _animationMemoryLifecycle;
 
   // 不能是 const，需要传入 isActive
 
@@ -836,6 +838,10 @@ class _MainPageState extends ConsumerState<MainPage>
     super.initState();
     _appLifecycleState =
         WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed;
+    _animationMemoryLifecycle = AnimationMemoryLifecycle(
+      onPause: NativeAnimatedImageProvider.pauseAllAnimations,
+      onResume: NativeAnimatedImageProvider.resumeAllAnimations,
+    );
     WidgetsBinding.instance.addObserver(this);
     UserPresenceService().setForeground(true, countAsActivity: true);
     HardwareKeyboard.instance.addHandler(_handlePresenceKeyEvent);
@@ -1087,6 +1093,7 @@ class _MainPageState extends ConsumerState<MainPage>
     }
     HardwareKeyboard.instance.removeHandler(_handlePresenceKeyEvent);
     WidgetsBinding.instance.removeObserver(this);
+    _animationMemoryLifecycle.dispose();
     _resumeDebounceTimer?.cancel();
     _pendingSingleTap?.cancel();
     _authErrorSub?.close();
@@ -1106,6 +1113,7 @@ class _MainPageState extends ConsumerState<MainPage>
     if (_appLifecycleState != state && mounted) {
       setState(() => _appLifecycleState = state);
     }
+    _animationMemoryLifecycle.handle(state);
 
     if (state == AppLifecycleState.resumed) {
       UserPresenceService().setForeground(true, countAsActivity: true);

@@ -49,7 +49,8 @@ dependencies:
   # 自研:native Rust 解码动图(GIF/APNG/动画 WebP),绕开 Flutter Skia
   # multi_frame_codec 在 disposal=2 等场景下的 #85831 bug。
   # 源码:https://github.com/Lingyan000/native_animated_image
-  native_animated_image: ^0.3.4
+  native_animated_image:
+    path: packages/native_animated_image
   flutter_riverpod: ^3.3.2
   extended_image_lite:
     path: packages/extended_image_lite
@@ -216,7 +217,6 @@ flutter:
         # Flutter 3.41+ FontWeight 会映射到 wght variation axis，因此即使
         # 不显式声明 weight，TextStyle(fontWeight: FontWeight.wXXX) 也能精准命中。
         - asset: assets/fonts/MiSansVF.ttf
-
 
 
 
