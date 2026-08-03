@@ -136,11 +136,9 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
       if (!widget.isActive) return;
       switch (event.action) {
         case NavAction.scrollToTop:
-          ref.read(fabRefreshModeProvider.notifier).state = false;
           ref.read(scrollToTopProvider.notifier).trigger();
           break;
         case NavAction.refresh:
-          ref.read(fabRefreshModeProvider.notifier).state = false;
           ref.read(scrollToTopProvider.notifier).trigger();
           ref.read(fabRefreshSignalProvider.notifier).trigger();
           ref.resetNavScrollProgress(NavEntryIds.home);
@@ -172,9 +170,17 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
           ? _TopicsFab(
               onCreateTopic: () => _createTopic(context, ref),
               onOpenDrafts: () => _openDrafts(context),
+              onRefresh: Responsive.showNavigationRail(context)
+                  ? () => _refreshTopics(ref)
+                  : null,
             )
           : null,
     );
+  }
+
+  void _refreshTopics(WidgetRef ref) {
+    ref.read(scrollToTopProvider.notifier).trigger();
+    ref.read(fabRefreshSignalProvider.notifier).trigger();
   }
 
   /// 包裹面板：点击切换活跃面板 + Tab 切换时短暂高亮顶部指示条
@@ -232,15 +238,17 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
   }
 }
 
-/// 首页 FAB：向上滚动时切换为刷新按钮，正常模式下点击展开 Speed Dial 菜单
+/// 首页创建 FAB：点击展开 Speed Dial 菜单
 class _TopicsFab extends ConsumerStatefulWidget {
   const _TopicsFab({
     required this.onCreateTopic,
     required this.onOpenDrafts,
+    this.onRefresh,
   });
 
   final VoidCallback onCreateTopic;
   final VoidCallback onOpenDrafts;
+  final VoidCallback? onRefresh;
 
   @override
   ConsumerState<_TopicsFab> createState() => _TopicsFabState();
@@ -391,7 +399,9 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
             showWhenUnlinked: false,
             targetAnchor: Alignment.topRight,
             followerAnchor: Alignment.bottomRight,
-            offset: const Offset(0, -16),
+            // 桌面端刷新 FAB 位于“＋”上方；Speed Dial 菜单继续向上
+            // 让开整个按钮组。手机没有独立刷新 FAB，保留原偏移。
+            offset: Offset(0, widget.onRefresh == null ? -16 : -84),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.end,
@@ -430,53 +440,45 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
     _overlayEntry = null;
   }
 
-  void _refreshTopics() {
-    ref.read(fabRefreshModeProvider.notifier).state = false;
-    ref.read(scrollToTopProvider.notifier).trigger();
-    ref.read(fabRefreshSignalProvider.notifier).trigger();
-  }
-
   @override
   Widget build(BuildContext context) {
-    final showRefresh = ref.watch(fabRefreshModeProvider);
+    // 主 FAB（作为锚点，子按钮在 Overlay 中定位到它上方）
+    // 模糊开启时，展开后隐藏真实 FAB（overlay 中有 sharp 副本）
+    final dialogBlur = ref.watch(
+      preferencesProvider.select((p) => p.dialogBlur),
+    );
+    final hideFab = _isExpanded && dialogBlur;
 
-    // 刷新模式切换时自动收起
-    if (showRefresh && _isExpanded) {
-      _close();
-    }
-
-    final Widget fab;
-    if (showRefresh) {
-      // 刷新模式：简单的单按钮
-      fab = FloatingActionButton(
-        heroTag: 'createTopic',
-        onPressed: _refreshTopics,
-        child: const Icon(Symbols.refresh_rounded),
-      );
-    } else {
-      // 主 FAB（作为锚点，子按钮在 Overlay 中定位到它上方）
-      // 模糊开启时，展开后隐藏真实 FAB（overlay 中有 sharp 副本）
-      final dialogBlur = ref.watch(
-        preferencesProvider.select((p) => p.dialogBlur),
-      );
-      final hideFab = _isExpanded && dialogBlur;
-
-      fab = CompositedTransformTarget(
-        link: _layerLink,
-        child: Opacity(
-          opacity: hideFab ? 0 : 1,
-          child: FloatingActionButton(
-            heroTag: 'createTopic',
-            onPressed: _toggle,
-            child: AnimatedRotation(
-              turns: _isExpanded ? 0.125 : 0,
-              duration: const Duration(milliseconds: 200),
-              child: const Icon(Symbols.add_rounded),
-            ),
+    final createFab = CompositedTransformTarget(
+      link: _layerLink,
+      child: Opacity(
+        opacity: hideFab ? 0 : 1,
+        child: FloatingActionButton(
+          heroTag: 'createTopic',
+          onPressed: _toggle,
+          child: AnimatedRotation(
+            turns: _isExpanded ? 0.125 : 0,
+            duration: const Duration(milliseconds: 200),
+            child: const Icon(Symbols.add_rounded),
           ),
         ),
-      );
-    }
+      ),
+    );
+
+    final fab = widget.onRefresh == null
+        ? createFab
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              FloatingActionButton(
+                heroTag: 'refreshTopics',
+                onPressed: widget.onRefresh,
+                child: const Icon(Symbols.refresh_rounded),
+              ),
+              const SizedBox(height: 12),
+              createFab,
+            ],
+          );
 
     // 跟随底栏升降：FAB 的 Positioned 锚在系统安全区基线
     // （MasterDetailLayout 用 viewPadding），底栏可见时按可见度把
