@@ -279,6 +279,7 @@ class _AnimatedSvgViewState extends State<AnimatedSvgView> {
   final Object _token = Object();
   final Object _adaptiveFrameOwner = Object();
   final GlobalKey _boundaryKey = GlobalKey();
+  bool _adaptiveFrameRate = false;
 
   late int _cacheKey; // 原始源码会话内 hash(不等 strip)
   late double _aspect; // 根 <svg> 宽高比

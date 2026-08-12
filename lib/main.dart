@@ -945,6 +945,7 @@ class _MainPageState extends ConsumerState<MainPage>
   Timer? _pendingSingleTap;
   List<NavEntry> _lastResolvedEntries = const [];
   Timer? _resumeDebounceTimer;
+  bool _clipboardCheckInFlight = false;
   DateTime? _lastBackPressTime;
   late AppLifecycleState _appLifecycleState;
   late final AnimationMemoryLifecycle _animationMemoryLifecycle;

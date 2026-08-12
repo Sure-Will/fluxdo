@@ -120,6 +120,7 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
   @override
   Widget build(BuildContext context) {
     final selectedTopic = ref.watch(selectedTopicProvider);
+    final canShowDetailPane = MasterDetailLayout.canShowBothPanesFor(context);
     // 左栏本质是不是"列表"（信息流）——决定给窄栏还是对半分
     _masterIsListLike = !selectedTopic.isStacked;
     final user = ref.watch(currentUserProvider).value;
@@ -200,6 +201,22 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
             )
           : null,
     );
+  }
+
+  void _showFeed() {
+    final notifier = ref.read(selectedTopicProvider.notifier);
+    if (ref.read(selectedTopicProvider).hasSelection &&
+        !MasterDetailLayout.canShowBothPanesFor(context)) {
+      notifier.clear();
+    } else {
+      notifier.collapseToTop();
+    }
+    setState(() {
+      _showEmbeddedSearch = false;
+      _embeddedSearchFilter = null;
+      _leftCategory = null;
+      _leftTag = null;
+    });
   }
 
   void _refreshTopics(WidgetRef ref) {
