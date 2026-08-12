@@ -6,17 +6,25 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 import '../l10n/s.dart';
+import '../models/search_filter.dart';
+import '../models/category.dart';
 import '../navigation/nav_action_bus.dart';
 import '../providers/preferences_provider.dart';
 import '../providers/selected_topic_provider.dart';
 import '../providers/shortcut_provider.dart';
 import '../providers/discourse_providers.dart';
+import '../services/dynamic_content_suspension_service.dart';
 import '../utils/platform_utils.dart';
 import '../utils/blur_config.dart';
 import '../utils/responsive.dart';
 import '../widgets/layout/master_detail_layout.dart';
+import '../widgets/layout/pane_projection_back_scope.dart';
+import '../widgets/layout/home_workspace_scope.dart';
 import 'topics_page.dart';
+import 'search_page.dart';
+import 'settings_page.dart';
 import 'topic_detail_page/topic_detail_page.dart';
+import 'user_profile_page.dart';
 import 'create_topic_page.dart';
 import 'drafts_page.dart';
 
@@ -33,12 +41,35 @@ class TopicsScreen extends ConsumerStatefulWidget {
 }
 
 class _TopicsScreenState extends ConsumerState<TopicsScreen> {
-  bool? _lastCanShowDetailPane;
-  bool _isAutoSwitching = false;
+  bool _showEmbeddedSearch = false;
+  SearchFilter? _embeddedSearchFilter;
+  Category? _leftCategory;
+  String? _leftTag;
+
+  /// 桌面 ESC 两段式:右栏/投影开着→分发落 detail scope(关右栏);空态→
+  /// 注册 maybePop(首页是首路由,no-op,注册无害但保持机制一致)。
+  late final PaneHostEscBinding _escBinding = PaneHostEscBinding(
+    ref: ref,
+    enabled: () => widget.isActive,
+  );
+
+  @override
+  void dispose() {
+    _escBinding.dispose();
+    super.dispose();
+  }
+
+  /// 左栏是不是"列表形态"（信息流 / 草稿列表）。列表给窄栏，内容预览
+  /// 才对半分。build 里按当前栈算。
+  bool _masterIsListLike = true;
 
   /// 当前活跃的 provider 实例 ID，布局切换时复用
   String? _activeInstanceId;
   int? _activeTopicId;
+
+  /// 历史注:曾用持久化 per-topicId GlobalKey 让话题面板在 master/detail
+  /// 槽位间"挪动",红屏翻车已回退(`'_elements.contains(element)'` 断言)。
+  /// 胶片带模型下该问题不存在:格子恒驻,从不跨槽挪动。
 
   /// topicId 变化时生成新 instanceId，相同 topicId 复用
   /// 如果提供了 existingInstanceId（如从全屏详情页传回），直接采用
@@ -55,85 +86,75 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
     return _activeInstanceId!;
   }
 
-  void _maybePushDetail(SelectedTopicState selectedTopic, bool canShowDetailPane) {
-    if (_isAutoSwitching) return;
-
-    // IndexedStack 中非活跃 tab 仍需更新状态，避免切回时误触发
-    if (!widget.isActive) {
-      _lastCanShowDetailPane = canShowDetailPane;
+  /// 侧栏板块导航（切换或重选）时收起深层平行视界与嵌入态，退回列表。
+  void _collapseParallelForSidebarNav() {
+    final state = ref.read(selectedTopicProvider);
+    // 窄屏投影态:详情全宽盖着列表,collapseToTop 对单层栈是 no-op,
+    // 不清就会"点了板块没反应"(列表在投影底下换好了但看不见)——
+    // 投影态下切板块语义就是回列表,整栈清空。
+    final projecting =
+        state.hasSelection && !MasterDetailLayout.canShowBothPanesFor(context);
+    if (!state.isStacked &&
+        !projecting &&
+        !_showEmbeddedSearch &&
+        _leftCategory == null &&
+        _leftTag == null) {
       return;
     }
-
-    // 当前路由不在栈顶时（有其他页面覆盖），根据布局判断是否清除选中
-    final route = ModalRoute.of(context);
-    if (route != null && !route.isCurrent) {
-      // 单栏模式下选中状态没有意义（看不到），清除并释放 provider 缓存
-      if (!canShowDetailPane && selectedTopic.hasSelection) {
-        _activeTopicId = null;
-        _activeInstanceId = null;
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) ref.read(selectedTopicProvider.notifier).clear();
-        });
-      }
-      // 双栏模式下保留选中状态（从详情面板 push 到其他页面，回来还要显示）
-      _lastCanShowDetailPane = canShowDetailPane;
-      return;
+    final notifier = ref.read(selectedTopicProvider.notifier);
+    if (projecting) {
+      notifier.clear();
+    } else {
+      notifier.collapseToTop();
     }
-
-    final previous = _lastCanShowDetailPane;
-    _lastCanShowDetailPane = canShowDetailPane;
-
-    // 从双栏切到单栏时自动 push；如果 previous 为空但当前为单栏且有选中，
-    // 也执行 push，避免因状态丢失导致无法自动进入详情。
-    if (!canShowDetailPane && selectedTopic.hasSelection && (previous == null || previous == true)) {
-
-      final topicId = selectedTopic.topicId;
-      if (topicId == null) return;
-
-      // 复用同一个 instanceId，避免重新 fetch
-      final instanceId = _getOrCreateInstanceId(topicId);
-      // 读取嵌入式详情页的实际浏览位置（在当前 build 中嵌入页还在 tree 中）
-      final scrollPosition = ref.read(detailScrollPositionProvider(topicId))
-          ?? selectedTopic.scrollToPostNumber;
-
-      _isAutoSwitching = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        final navigator = Navigator.of(context);
-        ref.read(selectedTopicProvider.notifier).clear();
-        navigator
-            .push(
-          MaterialPageRoute(
-            builder: (_) => TopicDetailPage(
-              topicId: topicId,
-              initialTitle: selectedTopic.initialTitle,
-              scrollToPostNumber: scrollPosition,
-              autoSwitchToMasterDetail: true,
-              instanceId: instanceId,
-            ),
-          ),
-        )
-            .whenComplete(() {
-          if (mounted) {
-            setState(() => _isAutoSwitching = false);
-          }
-        });
+    if (mounted) {
+      setState(() {
+        _showEmbeddedSearch = false;
+        _embeddedSearchFilter = null;
+        _leftCategory = null;
+        _leftTag = null;
       });
-      return;
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final selectedTopic = ref.watch(selectedTopicProvider);
-    final canShowDetailPane = MasterDetailLayout.canShowBothPanesFor(context);
+    // 左栏本质是不是"列表"（信息流）——决定给窄栏还是对半分
+    _masterIsListLike = !selectedTopic.isStacked;
     final user = ref.watch(currentUserProvider).value;
+
+    // 左侧导航栏的板块快捷入口位于平行视界布局之外。切换板块时除了让
+    // TopicsPage 换 Tab，还必须收起“上一层内容”左栏，否则列表虽然已在
+    // 后台切换，界面仍被旧话题覆盖，看起来就像点击无响应。
+    //
+    // 两个来源都要听：高亮状态变化（含置 null 的路径，如打开板块管理），
+    // 以及 tap 事件——后者覆盖「重选当前板块」（状态同值被去重，只有
+    // tap 事件会到）。普通切换两个都触发，处理器有早退保护，跑两遍无害。
+    ref.listen(activeSidebarCategoryIdProvider, (_, _) {
+      _collapseParallelForSidebarNav();
+    });
+    ref.listen(sidebarCategoryTapProvider, (_, _) {
+      _collapseParallelForSidebarNav();
+    });
 
     // 监听底栏派发的快捷动作（仅活跃 tab 响应）
     ref.listen(navActionBusProvider, (_, event) {
       if (event == null) return;
       if (event.targetId != NavEntryIds.home) return;
       if (!widget.isActive) return;
+      // 投影态(窄屏详情全宽盖着列表)下点"首页"=回列表,与压栈态同语义
+      final projecting =
+          selectedTopic.hasSelection &&
+          !MasterDetailLayout.canShowBothPanesFor(context);
+      if (_showEmbeddedSearch ||
+          _leftCategory != null ||
+          _leftTag != null ||
+          selectedTopic.isStacked ||
+          projecting) {
+        _showFeed();
+        return;
+      }
       switch (event.action) {
         case NavAction.scrollToTop:
           ref.read(scrollToTopProvider.notifier).trigger();
@@ -146,10 +167,13 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
       }
     });
 
-    _maybePushDetail(selectedTopic, canShowDetailPane);
+    // ESC 语义:栈非空(宽屏右栏开着/窄屏投影着)都让分发落 detail scope
+    // (关右栏/关投影);栈空才注册 maybePop 关整页。
+    _escBinding.sync(context, paneOpen: selectedTopic.hasSelection);
 
     // 统一使用 MasterDetailLayout 处理所有情况
-    // 手机/平板单栏：只显示 master
+    // 手机/平板单栏：只显示 master;栈非空时 detail 在本页体内全宽投影
+    // (平行视界栈是唯一真相,不 push 合成路由,宽窄切换 State 原地保留)
     // 平板双栏：显示 master + detail
     return MasterDetailLayout(
       master: _wrapPaneTap(ActivePane.master, const TopicsPage()),
@@ -199,6 +223,8 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
   }
 
   void _openDrafts(BuildContext context) {
+    // 草稿页是独立的双栏页（宽屏自带"左列表右话题"），所有入口统一
+    // 全屏打开，不再往平行视界栈里塞草稿层。
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => const DraftsPage()),
@@ -210,10 +236,12 @@ class _TopicsScreenState extends ConsumerState<TopicsScreen> {
     final tags = ref.read(tabTagsProvider(categoryId));
     final topicId = await Navigator.push<int>(
       context,
-      MaterialPageRoute(builder: (_) => CreateTopicPage(
-        initialCategoryId: categoryId,
-        initialTags: tags.isNotEmpty ? tags : null,
-      )),
+      MaterialPageRoute(
+        builder: (_) => CreateTopicPage(
+          initialCategoryId: categoryId,
+          initialTags: tags.isNotEmpty ? tags : null,
+        ),
+      ),
     );
     if (topicId != null && context.mounted) {
       // 刷新当前 tab 的列表
@@ -261,6 +289,9 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
   final LayerLink _layerLink = LayerLink();
   bool _isExpanded = false;
   OverlayEntry? _overlayEntry;
+  LocalHistoryEntry? _historyEntry;
+  bool _removingHistory = false;
+  DynamicContentSuspensionLease? _dynamicContentLease;
 
   @override
   void initState() {
@@ -277,6 +308,7 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
 
   @override
   void dispose() {
+    _removeHistoryEntry();
     _removeOverlay();
     _controller.dispose();
     super.dispose();
@@ -287,13 +319,15 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
       _close();
     } else {
       setState(() => _isExpanded = true);
-      _controller.forward();
+      _addHistoryEntry();
       _showOverlay();
+      _controller.forward();
       HapticFeedback.lightImpact();
     }
   }
 
-  void _close({bool immediately = false}) {
+  void _close({bool immediately = false, bool fromHistory = false}) {
+    if (!fromHistory) _removeHistoryEntry();
     if (!_isExpanded) return;
     setState(() => _isExpanded = false);
     if (immediately) {
@@ -307,12 +341,41 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
     });
   }
 
+  void _addHistoryEntry() {
+    if (_historyEntry != null) return;
+    final route = ModalRoute.of(context);
+    if (route == null) return;
+    _historyEntry = LocalHistoryEntry(
+      impliesAppBarDismissal: false,
+      onRemove: () {
+        _historyEntry = null;
+        if (!_removingHistory && mounted) {
+          _close(fromHistory: true);
+        }
+      },
+    );
+    route.addLocalHistoryEntry(_historyEntry!);
+  }
+
+  void _removeHistoryEntry() {
+    final entry = _historyEntry;
+    if (entry == null) return;
+    _historyEntry = null;
+    _removingHistory = true;
+    entry.remove();
+    _removingHistory = false;
+  }
+
   void _showOverlay() {
     _removeOverlay();
+    // 在展开动画和全屏背景模糊开始前先暂停帖子动态内容，避免首帧就与
+    // SVG/WebView 纹理提交争抢 UI、raster 和 GPU。
+    _acquireDynamicContentSuspension();
     final theme = Theme.of(context);
-    final dialogBlur = ProviderScope.containerOf(context, listen: false)
-        .read(preferencesProvider)
-        .dialogBlur;
+    final dialogBlur = ProviderScope.containerOf(
+      context,
+      listen: false,
+    ).read(preferencesProvider).dialogBlur;
 
     // 桌面 acrylic 模式下 NavigationRail 背景透明，
     // BackdropFilter 对其模糊效果异常，需跳过该区域
@@ -438,6 +501,18 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
     _overlayEntry?.remove();
     _overlayEntry?.dispose();
     _overlayEntry = null;
+    _releaseDynamicContentSuspension();
+  }
+
+  void _acquireDynamicContentSuspension() {
+    _dynamicContentLease ??= DynamicContentSuspensionService.instance.acquire(
+      reason: 'topics_fab_speed_dial',
+    );
+  }
+
+  void _releaseDynamicContentSuspension() {
+    _dynamicContentLease?.release();
+    _dynamicContentLease = null;
   }
 
   @override
@@ -528,7 +603,9 @@ class _TopicsFabState extends ConsumerState<_TopicsFab>
                 onTap: onTap,
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 12, vertical: 8),
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
                   child: Text(
                     label,
                     style: theme.textTheme.labelLarge?.copyWith(
@@ -613,17 +690,24 @@ class _PaneActiveIndicatorState extends ConsumerState<_PaneActiveIndicator>
               child: FadeTransition(
                 opacity: _anim,
                 child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 14,
+                  ),
                   decoration: BoxDecoration(
-                    color: theme.colorScheme.inverseSurface
-                        .withValues(alpha: 0.8),
+                    color: theme.colorScheme.inverseSurface.withValues(
+                      alpha: 0.8,
+                    ),
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Icon(icon, size: 18, color: theme.colorScheme.onInverseSurface),
+                      Icon(
+                        icon,
+                        size: 18,
+                        color: theme.colorScheme.onInverseSurface,
+                      ),
                       const SizedBox(width: 8),
                       Text(
                         label,
@@ -644,6 +728,10 @@ class _PaneActiveIndicatorState extends ConsumerState<_PaneActiveIndicator>
 }
 
 /// 话题详情面板（用于双栏模式，不包含返回按钮）
+///
+/// 首页话题列表跟私信列表各自有一份独立的平行视界导航栈
+/// （[selectedTopicProvider] / [selectedMessageProvider]），这个面板
+/// 两边都复用，靠 [stackProvider] 区分内部链接点击该压到哪个栈。
 class TopicDetailPane extends ConsumerWidget {
   const TopicDetailPane({
     super.key,
@@ -652,6 +740,14 @@ class TopicDetailPane extends ConsumerWidget {
     this.instanceId,
     this.initialTitle,
     this.scrollToPostNumber,
+    this.highlightBoostUsername,
+    this.initialRevisionPostNumber,
+    this.initialRevisionNumber,
+    this.onBack,
+    this.stackProvider,
+    this.truncateOnPush = false,
+    this.autoOpenReply = false,
+    this.autoReplyToPostNumber,
   });
 
   final int topicId;
@@ -659,16 +755,123 @@ class TopicDetailPane extends ConsumerWidget {
   final String? instanceId;
   final String? initialTitle;
   final int? scrollToPostNumber;
+  final String? highlightBoostUsername;
+  final int? initialRevisionPostNumber;
+  final int? initialRevisionNumber;
+
+  /// 平行视界导航栈：非 null 时说明当前层是内部链接跳转堆上来的
+  /// （栈深度 > 1），显示返回按钮弹出当前层。
+  final VoidCallback? onBack;
+
+  /// 内部链接点击时压栈的目标 provider，默认 [selectedTopicProvider]。
+  final SelectedTopicProvider? stackProvider;
+
+  /// true = 这份内容只是 master 面板里的"上一层预览"，不是当前可交互
+  /// 的栈顶——内部链接点击应该截断栈顶后压入（替换右侧正显示的那层），
+  /// 见 [TopicDetailPage.truncateOnPush] 注释。
+  final bool truncateOnPush;
+
+  /// 进入即弹回复框(草稿续写)。
+  final bool autoOpenReply;
+  final int? autoReplyToPostNumber;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final restoredScrollPosition = instanceId == null
+        ? null
+        : ref.read(
+            detailScrollPositionProvider((
+              topicId: topicId,
+              instanceId: instanceId!,
+            )),
+          );
     return TopicDetailPage(
       topicId: topicId,
       instanceId: instanceId,
+      stackProvider: stackProvider,
       initialTitle: initialTitle,
-      scrollToPostNumber: scrollToPostNumber,
-      embeddedMode: true, // 嵌入模式，不显示返回按钮
+      // 面板在 master/detail 槽位之间搬动会重建 Widget，但 provider 与
+      // 视口位置都沿用同一个 instanceId，不再退回最初进入时的楼层。
+      scrollToPostNumber: restoredScrollPosition ?? scrollToPostNumber,
+      highlightBoostUsername: highlightBoostUsername,
+      initialRevisionPostNumber: initialRevisionPostNumber,
+      initialRevisionNumber: initialRevisionNumber,
+      embeddedMode: true, // 嵌入模式，返回按钮由 onEmbeddedBack 控制
+      truncateOnPush: truncateOnPush,
+      onEmbeddedBack: onBack,
       parentActive: parentActive,
+      autoOpenReply: autoOpenReply,
+      // 弹过一次就把意图从栈里清掉，否则面板每次重建都会再弹
+      onAutoReplyConsumed: () => ref
+          .read((stackProvider ?? selectedTopicProvider).notifier)
+          .consumeAutoOpenReply(),
+      autoReplyToPostNumber: autoReplyToPostNumber,
     );
+  }
+}
+
+/// 平行视界导航栈某一层的内容——按 [entry.kind] 分发到话题详情或个人
+/// 资料页，两者共用同一套栈（[stackProvider]）+ 返回语义（[onBack]）。
+class PaneContentWidget extends StatelessWidget {
+  const PaneContentWidget({
+    super.key,
+    required this.entry,
+    required this.stackProvider,
+    this.onBack,
+    this.parentActive = false,
+    this.truncateOnPush = false,
+  });
+
+  final PaneEntry entry;
+  final SelectedTopicProvider stackProvider;
+  final VoidCallback? onBack;
+  final bool parentActive;
+
+  /// true = master 面板里的"上一层预览"——内部链接点击/列表点击应该
+  /// 截断栈顶后压入（替换右侧正显示的那层），而不是在已经很深的栈上
+  /// 继续叠层——见 [EmbeddedStackScope.truncateOnPush] 注释。
+  final bool truncateOnPush;
+
+  @override
+  Widget build(BuildContext context) {
+    switch (entry.kind) {
+      case PaneKind.topic:
+        return TopicDetailPane(
+          topicId: entry.topicId!,
+          parentActive: parentActive,
+          instanceId: entry.instanceId,
+          initialTitle: entry.initialTitle,
+          scrollToPostNumber: entry.scrollToPostNumber,
+          highlightBoostUsername: entry.highlightBoostUsername,
+          initialRevisionPostNumber: entry.initialRevisionPostNumber,
+          initialRevisionNumber: entry.initialRevisionNumber,
+          onBack: onBack,
+          stackProvider: stackProvider,
+          truncateOnPush: truncateOnPush,
+          autoOpenReply: entry.autoOpenReply,
+          autoReplyToPostNumber: entry.autoReplyToPostNumber,
+        );
+      case PaneKind.profile:
+        return EmbeddedStackScope(
+          stackProvider: stackProvider,
+          truncateOnPush: truncateOnPush,
+          child: UserProfilePage(
+            username: entry.username!,
+            embeddedMode: true,
+            onEmbeddedBack: onBack,
+            parentActive: parentActive,
+          ),
+        );
+      case PaneKind.settings:
+        return EmbeddedStackScope(
+          stackProvider: stackProvider,
+          truncateOnPush: truncateOnPush,
+          child: SettingsPage(
+            embeddedMode: true,
+            onEmbeddedBack: onBack,
+            parentActive: parentActive,
+          ),
+        );
+    }
   }
 }
