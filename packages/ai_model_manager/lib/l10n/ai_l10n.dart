@@ -130,6 +130,7 @@ class AiL10n {
   String get thinkingLow => '轻度思考';
   String get thinkingMedium => '中度思考';
   String get thinkingHigh => '深度思考';
+  String get thinkingMax => '极限思考';
   String get chatHistory => '聊天记录';
   String get titleGenerationModel => '标题生成模型';
   String get autoGenerateTitleSubtitle => '自动为新会话生成标题';

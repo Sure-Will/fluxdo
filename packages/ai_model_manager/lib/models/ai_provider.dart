@@ -33,8 +33,12 @@ enum ModelAbility { tool, reasoning }
 enum ModelCapability { vision, reasoning, tool, imageOutput }
 
 /// 思考深度等级，统一映射到各供应商 API 参数。
-/// [custom] 使用 [ThinkingConfig.customBudget] 自定义 token 数。
-enum ThinkingLevel { off, auto, low, medium, high, custom }
+/// [custom] 使用 [ThinkingConfig.customBudget] 自定义 token 数；[max] 是
+/// DeepSeek V4 Flash 的最大思考力度。
+///
+/// 新等级只追加在末尾：这个枚举的整数索引会落盘到 SharedPreferences，不能
+/// 调整已有成员的顺序，否则会把旧用户的思考配置读成另一档。
+enum ThinkingLevel { off, auto, low, medium, high, custom, max }
 
 /// 思考配置：等级 + 自定义预算
 class ThinkingConfig {

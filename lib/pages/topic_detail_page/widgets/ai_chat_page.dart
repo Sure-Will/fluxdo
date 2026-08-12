@@ -25,6 +25,7 @@ import '../../../widgets/ai/ai_quick_prompts_bar.dart';
 import '../../../widgets/share/ai_share_image_preview.dart';
 import 'package:common_ui/common_ui.dart';
 import 'ai_chat_input.dart';
+import 'ai_context_readiness_gate.dart';
 import 'ai_chat_message_item.dart';
 import 'ai_context_selector.dart';
 
@@ -34,6 +35,19 @@ import 'ai_context_selector.dart';
 /// 的 output 推断（首次进入时）。用户主动切换后会持有具体值。
 final topicChatModeProvider = StateProvider.autoDispose
     .family<PromptType?, int>((_, topicId) => null);
+
+/// V4 Flash 使用与 API 力度字段一致的英文标签。
+String deepSeekV4FlashThinkingLabel(ThinkingLevel level) {
+  return switch (level) {
+    ThinkingLevel.off => 'Off',
+    ThinkingLevel.auto => 'Auto',
+    ThinkingLevel.low => 'Low',
+    ThinkingLevel.medium => 'Medium',
+    ThinkingLevel.high => 'High',
+    ThinkingLevel.custom => 'Custom',
+    ThinkingLevel.max => 'Max',
+  };
+}
 
 /// AI 聊天全屏页面
 class AiChatPage extends ConsumerStatefulWidget {
@@ -85,12 +99,25 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
   /// 是否正在加载上下文
   bool _isLoadingContext = false;
 
-  /// 上一次加载使用的 scope，用于检测变化
-  ContextScope? _lastLoadedScope;
+  /// 防止首次 build 在加载失败后无限重复发起上下文请求。
+  bool _initialContextRequested = false;
+
+  late final ContextReadinessGate<ContextScope> _contextReadinessGate;
 
   /// 多选模式
   bool _selectionMode = false;
   final Set<String> _selectedMessageIds = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _contextReadinessGate = ContextReadinessGate(
+      currentTarget: () =>
+          ref.read(topicAiContextScopeProvider(widget.topicId)),
+      isReady: _hasContextPostsFor,
+      load: _loadContextPostsFor,
+    );
+  }
 
   @override
   void dispose() {
@@ -102,36 +129,60 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
   void didUpdateWidget(AiChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.detail != oldWidget.detail && widget.detail != null) {
-      _ensureContextPosts();
+      unawaited(_ensureContextPosts());
     }
   }
 
-  /// 确保上下文帖子已加载，根据当前 scope 需要的数量
-  Future<void> _ensureContextPosts() async {
+  /// 确保当前选择范围的帖子完整到位后才允许发送。
+  Future<bool> _ensureContextPosts() {
     final detail = widget.detail;
-    if (detail == null || _isLoadingContext) return;
+    if (detail == null) return Future.value(true);
 
     final scope = ref.read(topicAiContextScopeProvider(widget.topicId));
+    if (_hasContextPostsFor(scope)) {
+      _syncToNotifier(detail.title);
+      return Future.value(true);
+    }
 
-    // 计算需要多少条帖子
+    if (!_isLoadingContext && mounted) {
+      setState(() => _isLoadingContext = true);
+    }
+
+    return _contextReadinessGate
+        .ensure()
+        .then((ready) {
+          final currentDetail = widget.detail;
+          if (mounted && ready && currentDetail != null) {
+            _syncToNotifier(currentDetail.title);
+          }
+          return ready;
+        })
+        .whenComplete(() {
+          if (mounted) setState(() => _isLoadingContext = false);
+        });
+  }
+
+  bool _hasContextPostsFor(ContextScope scope) {
+    final detail = widget.detail;
+    if (detail == null) return true;
+    final stream = detail.postStream.stream;
+    final needed = _postCountForScope(scope, stream.length);
+    return stream.take(needed).every(_fetchedPostIds.contains);
+  }
+
+  /// 拉取一个固定范围。范围在加载期间改变时，由
+  /// [ContextReadinessGate] 再跑一轮最新范围。
+  Future<bool> _loadContextPostsFor(ContextScope scope) async {
+    final detail = widget.detail;
+    if (detail == null) return true;
+
     final stream = detail.postStream.stream;
     final needed = _postCountForScope(scope, stream.length);
     final neededIds = stream.take(needed).toList();
-
-    // 检查是否已经有足够的帖子
-    if (neededIds.every(_fetchedPostIds.contains)) {
-      _lastLoadedScope = scope;
-      _syncToNotifier(detail.title);
-      return;
-    }
-
-    // 找出缺失的帖子 ID
     final missingIds = neededIds
         .where((id) => !_fetchedPostIds.contains(id))
         .toList();
-    if (missingIds.isEmpty) return;
-
-    setState(() => _isLoadingContext = true);
+    if (missingIds.isEmpty) return true;
 
     try {
       // 优先从已加载的 detail.postStream.posts 中取
@@ -186,36 +237,18 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
 
       // 按 postNumber 排序
       _contextPosts.sort((a, b) => a.postNumber.compareTo(b.postNumber));
-
-      _lastLoadedScope = scope;
-      if (mounted) {
-        _syncToNotifier(detail.title);
-      }
     } catch (_) {
-      // 加载失败仍允许聊天
-    } finally {
-      if (mounted) {
-        setState(() => _isLoadingContext = false);
-      }
+      return false;
     }
+
+    return neededIds.every(_fetchedPostIds.contains);
   }
 
   /// 当 scope 变更时检查是否需要加载更多帖子
   void _onScopeChanged(ContextScope newScope) {
     ref.read(topicAiContextScopeProvider(widget.topicId).notifier).state =
         newScope;
-
-    final detail = widget.detail;
-    if (detail == null) return;
-
-    final stream = detail.postStream.stream;
-    final needed = _postCountForScope(newScope, stream.length);
-    final neededIds = stream.take(needed).toSet();
-
-    // 检查是否缺少帖子
-    if (!neededIds.every(_fetchedPostIds.contains)) {
-      _ensureContextPosts();
-    }
+    unawaited(_ensureContextPosts());
   }
 
   /// 根据 scope 返回需要的帖子数量
@@ -636,10 +669,12 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
     final chatNotifier = ref.read(topicAiChatProvider(widget.topicId).notifier);
     _syncMessageListScroll(chatState);
 
-    // 首次 build 且有 detail 时加载上下文
-    if (widget.detail != null && _lastLoadedScope == null) {
+    // 首次 build 且有 detail 时加载上下文。失败后不在每一帧自动重试，
+    // 由用户再次切换范围或发送时显式触发，避免后台请求循环。
+    if (widget.detail != null && !_initialContextRequested) {
+      _initialContextRequested = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _ensureContextPosts();
+        if (mounted) unawaited(_ensureContextPosts());
       });
     }
 
@@ -901,9 +936,7 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
       children: [
         // 上下文加载提示
         if (_isLoadingContext)
-          M3eLinearProgress(
-            color: theme.colorScheme.primary,
-          ),
+          M3eLinearProgress(color: theme.colorScheme.primary),
 
         // 聊天主要内容区
         Expanded(
@@ -929,28 +962,17 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
             final isImageMode = _currentPresetType() == PromptType.image;
             return AiChatInput(
               isGenerating: chatState.isGenerating,
+              isContextLoading: _isLoadingContext,
               allowAttachments:
                   currentModel?.model.input.contains(Modality.image) ?? false,
               isImageMode: isImageMode,
               canEnterImageMode: _hasModelForMode(PromptType.image),
               onToggleImageMode: () =>
                   _switchMode(isImageMode ? PromptType.text : PromptType.image),
-              onSend: (content, attachments) {
-                final scope = ref.read(
-                  topicAiContextScopeProvider(widget.topicId),
-                );
-                final model = _currentModel();
-                if (model == null) return;
-                _resumeFollowingLatest();
-                _rememberModel(model);
-                chatNotifier.sendMessage(
-                  content,
-                  scope,
-                  selectedModel: model,
-                  attachments: attachments.isEmpty ? null : attachments,
-                  thinkingConfig: ref.read(aiThinkingConfigProvider),
-                );
-              },
+              onSend: (content, attachments) => _sendChatMessage(
+                content,
+                attachments: attachments.isEmpty ? null : attachments,
+              ),
               onStop: chatNotifier.stopGeneration,
               onEscape: widget.onEscape,
               modelButton: currentModel == null
@@ -965,7 +987,7 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
                       currentModel.model.abilities.contains(
                         ModelAbility.reasoning,
                       )
-                  ? _ThinkingButton(ref: ref)
+                  ? _ThinkingButton(ref: ref, selectedModel: currentModel)
                   : null,
             );
           },
@@ -987,25 +1009,45 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
     return PromptType.text;
   }
 
+  /// 统一手动输入和快捷预设的发送门槛，确保“全部帖子”已完整加载。
+  Future<bool> _sendChatMessage(
+    String content, {
+    List<AiChatAttachment>? attachments,
+    String? imageAspect,
+  }) async {
+    final contextReady = await _ensureContextPosts();
+    if (!mounted) return false;
+    if (!contextReady) {
+      ToastService.showError(context.l10n.common_loadFailedRetry);
+      return false;
+    }
+
+    final scope = ref.read(topicAiContextScopeProvider(widget.topicId));
+    final model = _currentModel();
+    if (model == null) return false;
+    _resumeFollowingLatest();
+    _rememberModel(model);
+    unawaited(
+      ref
+          .read(topicAiChatProvider(widget.topicId).notifier)
+          .sendMessage(
+            content,
+            scope,
+            selectedModel: model,
+            attachments: attachments,
+            thinkingConfig: ref.read(aiThinkingConfigProvider),
+            imageAspect: imageAspect,
+          ),
+    );
+    return true;
+  }
+
   /// AiQuickPromptsBar 选完一个 preset（已渲染好的最终 prompt）后调用
   ///
   /// [aspect] 是用户在维度面板选的（或 preset 默认）aspect ratio，会透传给
   /// 生图 API 的 size 参数（OpenAI ImageSize / Gemini imageConfig.aspectRatio）
   void _sendPresetPrompt(String prompt, {String? aspect}) {
-    final scope = ref.read(topicAiContextScopeProvider(widget.topicId));
-    final model = _currentModel();
-    if (model == null) return;
-    _resumeFollowingLatest();
-    _rememberModel(model);
-    ref
-        .read(topicAiChatProvider(widget.topicId).notifier)
-        .sendMessage(
-          prompt,
-          scope,
-          selectedModel: model,
-          thinkingConfig: ref.read(aiThinkingConfigProvider),
-          imageAspect: aspect,
-        );
+    unawaited(_sendChatMessage(prompt, imageAspect: aspect));
   }
 
   Widget _buildEmptyState(BuildContext context, ThemeData theme) {
@@ -1125,29 +1167,7 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
                 return AiChatMessageItem(
                   message: message,
                   onRetry: message.status == MessageStatus.error
-                      ? () {
-                          final scope = ref.read(
-                            topicAiContextScopeProvider(widget.topicId),
-                          );
-                          final model = _currentModel();
-                          if (model == null) return;
-                          _resumeFollowingLatest();
-                          _rememberModel(model);
-                          ref
-                              .read(
-                                topicAiChatProvider(widget.topicId).notifier,
-                              )
-                              .retryLastMessage(
-                                scope,
-                                selectedModel: model,
-                                // 透传当前 thinking 配置,否则重试会用 ThinkingConfig.off
-                                // 默认值,跟原请求不一致(用户感觉「重试就好」其实是
-                                // thinking 被静默关掉了,不是上游恢复)。
-                                thinkingConfig: ref.read(
-                                  aiThinkingConfigProvider,
-                                ),
-                              );
-                        }
+                      ? () => unawaited(_retryLastMessage())
                       : null,
                   onShareAsImage:
                       message.status == MessageStatus.completed &&
@@ -1187,6 +1207,31 @@ class _AiChatPageState extends ConsumerState<AiChatPage> {
           ),
       ],
     );
+  }
+
+  Future<void> _retryLastMessage() async {
+    final contextReady = await _ensureContextPosts();
+    if (!mounted) return;
+    if (!contextReady) {
+      ToastService.showError(context.l10n.common_loadFailedRetry);
+      return;
+    }
+
+    final scope = ref.read(topicAiContextScopeProvider(widget.topicId));
+    final model = _currentModel();
+    if (model == null) return;
+    _resumeFollowingLatest();
+    _rememberModel(model);
+    ref
+        .read(topicAiChatProvider(widget.topicId).notifier)
+        .retryLastMessage(
+          scope,
+          selectedModel: model,
+          // 透传当前 thinking 配置,否则重试会用 ThinkingConfig.off
+          // 默认值,跟原请求不一致(用户感觉「重试就好」其实是
+          // thinking 被静默关掉了,不是上游恢复)。
+          thinkingConfig: ref.read(aiThinkingConfigProvider),
+        );
   }
 
   /// 多选模式工具栏
@@ -1376,7 +1421,9 @@ class _SessionHistorySheetState extends State<_SessionHistorySheet> {
           final isCurrent = session.id == widget.currentSessionId;
 
           return ListTile(
-            leading: Icon(Symbols.chat_bubble_rounded, fill: isCurrent ? 1 : 0,
+            leading: Icon(
+              Symbols.chat_bubble_rounded,
+              fill: isCurrent ? 1 : 0,
               size: 20,
               color: isCurrent
                   ? theme.colorScheme.primary
@@ -1444,7 +1491,59 @@ class _SessionHistorySheetState extends State<_SessionHistorySheet> {
 /// 思考深度按钮：灯泡图标随等级变化，点击 toggle，长按弹出选择面板
 class _ThinkingButton extends StatelessWidget {
   final WidgetRef ref;
-  const _ThinkingButton({required this.ref});
+  final ({AiProvider provider, AiModel model}) selectedModel;
+
+  const _ThinkingButton({required this.ref, required this.selectedModel});
+
+  bool get _isDeepSeekV4Flash =>
+      ModelCapabilities.isDeepSeekV4Flash(selectedModel.model.id);
+
+  ThinkingLevel _displayLevel(ThinkingLevel level) {
+    // medium/custom 是旧的通用选项。用户切到 V4 Flash 后，这两档没有
+    // 对应的官方参数，按 high 显示并由请求层兼容到 high。
+    if (_isDeepSeekV4Flash &&
+        (level == ThinkingLevel.medium || level == ThinkingLevel.custom)) {
+      return ThinkingLevel.high;
+    }
+    return level;
+  }
+
+  List<ThinkingLevel> get _availableLevels {
+    if (_isDeepSeekV4Flash) {
+      return const [
+        ThinkingLevel.off,
+        ThinkingLevel.auto,
+        ThinkingLevel.low,
+        ThinkingLevel.high,
+        ThinkingLevel.max,
+      ];
+    }
+    return const [
+      ThinkingLevel.off,
+      ThinkingLevel.auto,
+      ThinkingLevel.low,
+      ThinkingLevel.medium,
+      ThinkingLevel.high,
+      ThinkingLevel.custom,
+    ];
+  }
+
+  String _labelFor(ThinkingLevel level) {
+    // V4 Flash 的这五档直接呈现官方 API 的英文力度名称，便于按实际
+    // reasoning_effort 值判断取舍，而不是再把中文的“深度/极限”反向翻译。
+    if (_isDeepSeekV4Flash) {
+      return deepSeekV4FlashThinkingLabel(level);
+    }
+    return switch (level) {
+      ThinkingLevel.off => AiL10n.current.thinkingOff,
+      ThinkingLevel.auto => AiL10n.current.thinkingAuto,
+      ThinkingLevel.low => AiL10n.current.thinkingLow,
+      ThinkingLevel.medium => AiL10n.current.thinkingMedium,
+      ThinkingLevel.high => AiL10n.current.thinkingHigh,
+      ThinkingLevel.custom => AiL10n.current.thinkingCustom,
+      ThinkingLevel.max => AiL10n.current.thinkingMax,
+    };
+  }
 
   static String _svgAsset(ThinkingLevel level) {
     return switch (level) {
@@ -1455,6 +1554,7 @@ class _ThinkingButton extends StatelessWidget {
         'assets/icons/thinking/idea-01-stroke-rounded.svg',
       ThinkingLevel.high => 'assets/icons/thinking/idea-01-more-rays.svg',
       ThinkingLevel.custom => 'assets/icons/thinking/idea-01-moremore-rays.svg',
+      ThinkingLevel.max => 'assets/icons/thinking/idea-01-moremore-rays.svg',
     };
   }
 
@@ -1469,7 +1569,11 @@ class _ThinkingButton extends StatelessWidget {
 
     return IconButton(
       onPressed: () => _showLevelSheet(context),
-      icon: _IdeaIcon(asset: _svgAsset(config.level), color: color, size: 20),
+      icon: _IdeaIcon(
+        asset: _svgAsset(_displayLevel(config.level)),
+        color: color,
+        size: 20,
+      ),
       tooltip: AiL10n.current.thinkingLevelLabel,
       style: IconButton.styleFrom(
         minimumSize: const Size(36, 36),
@@ -1489,40 +1593,13 @@ class _ThinkingButton extends StatelessWidget {
       contentPadding: EdgeInsets.zero,
       builder: (ctx) {
         final current = ref.read(aiThinkingConfigProvider);
+        final currentLevel = _displayLevel(current.level);
         return Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _levelTile(
-              ctx,
-              ThinkingLevel.off,
-              AiL10n.current.thinkingOff,
-              current.level,
-            ),
-            _levelTile(
-              ctx,
-              ThinkingLevel.auto,
-              AiL10n.current.thinkingAuto,
-              current.level,
-            ),
-            _levelTile(
-              ctx,
-              ThinkingLevel.low,
-              AiL10n.current.thinkingLow,
-              current.level,
-            ),
-            _levelTile(
-              ctx,
-              ThinkingLevel.medium,
-              AiL10n.current.thinkingMedium,
-              current.level,
-            ),
-            _levelTile(
-              ctx,
-              ThinkingLevel.high,
-              AiL10n.current.thinkingHigh,
-              current.level,
-            ),
-            _customTile(ctx, current),
+            for (final level in _availableLevels)
+              _levelTile(ctx, level, _labelFor(level), currentLevel),
+            if (!_isDeepSeekV4Flash) _customTile(ctx, current),
             const SizedBox(height: 8),
           ],
         );

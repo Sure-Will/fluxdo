@@ -490,6 +490,11 @@ jobs:
           ref: refs/heads/main
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      # fork 首次发稳定版时本仓库可能尚未推送上一版 tag。补齐上游 tag，
+      # 让 CHANGELOG 仍能以真正的上一稳定版为基线，而不是从整个历史开始。
+      - name: Fetch upstream release tags
+        run: git fetch --tags https://github.com/Lingyan000/fluxdo.git || true
+
       - name: Install git-cliff
         uses: taiki-e/install-action@v2
         with:
@@ -566,6 +571,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      # 同步 changelog job 的 tag 基线，避免 fork 的首次稳定版生成全量历史。
+      - name: Fetch upstream release tags
+        run: git fetch --tags https://github.com/Lingyan000/fluxdo.git || true
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -618,7 +627,7 @@ jobs:
         run: |
           echo "::warning::git-cliff 失败，回退到 legacy bash"
           tags=($(git tag --merged HEAD --sort=-creatordate))
-          preTag=$(curl -s "https://api.github.com/repos/lingyan000/fluxdo/releases/latest" | \
+          preTag=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" | \
           sed -nE 's/.*"tag_name": "([^"]+)".*/\1/p' || echo "")
 
           out="release_notes.md"
@@ -648,7 +657,10 @@ jobs:
 
       - name: Append release template
         run: |
-          sed 's/VERSION/${{ steps.version.outputs.VERSION }}/g' .github/release_template.md >> release_notes.md
+          sed \
+            -e 's/VERSION/${{ steps.version.outputs.VERSION }}/g' \
+            -e 's|REPOSITORY|${{ github.repository }}|g' \
+            .github/release_template.md >> release_notes.md
 
       - name: Generate SHA256 checksums
         if: env.IS_STABLE == 'true'
@@ -674,7 +686,7 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           VERSION_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          DOWNLOAD_URL="https://github.com/lingyan000/fluxdo/releases/download/v${VERSION}/fluxdo-unsigned.ipa"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/fluxdo-unsigned.ipa"
           IPA_SIZE=$(stat -c%s "./dist/fluxdo-unsigned.ipa" 2>/dev/null || stat -f%z "./dist/fluxdo-unsigned.ipa")
           # 从 plain 版本按段落边界截断到 1500 字符以内，避免硬截到段落中间
           VERSION_DESC=$(awk 'BEGIN{RS=""; ORS="\n\n"; n=0} {n+=length($0)+2; if(n>1500) exit; print}' release_notes.txt)

@@ -14,6 +14,15 @@ import '../models/ai_provider.dart';
 class ModelCapabilities {
   ModelCapabilities._();
 
+  /// 是否为 DeepSeek V4 Flash（含带日期/版本后缀的模型 ID）。
+  ///
+  /// 这个判断用于选择 DeepSeek 专属的 thinking 请求格式；不要用宽泛的
+  /// `deepseek-v4` 判断，否则会把 V4 Pro 或其他兼容模型误套进来。
+  static final RegExp _deepSeekV4Flash = RegExp(
+    r'(?:^|[/\\:_-])deepseek-v4-flash(?:[-_.](?:[0-9][a-z0-9]*|latest|preview))*$',
+    caseSensitive: false,
+  );
+
   /// 视觉模型（input 含 image）
   static final RegExp _vision = RegExp(
     // OpenAI: gpt-4o / gpt-4.1 / gpt-5（排除 gpt-5-chat 纯文本变体）/ o1/o3/o4 / chatgpt-4o
@@ -152,6 +161,11 @@ class ModelCapabilities {
   /// 或 generateContent + responseModalities=[image]（Gemini 系）。
   static bool isImageOutputModel(String modelId) {
     return _imageOutput.hasMatch(modelId.toLowerCase());
+  }
+
+  /// 是否为 DeepSeek V4 Flash。
+  static bool isDeepSeekV4Flash(String modelId) {
+    return _deepSeekV4Flash.hasMatch(modelId.trim());
   }
 
   // ────────────────────────── 能力维度统一查询 / 写入 ──────────────────────────

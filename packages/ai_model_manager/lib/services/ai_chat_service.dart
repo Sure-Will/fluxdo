@@ -15,10 +15,12 @@ import 'package:uuid/uuid.dart';
 import '../l10n/ai_l10n.dart';
 import '../models/ai_chat_attachment.dart';
 import '../models/ai_chat_message.dart';
+import '../models/ai_provider.dart';
 import '../utils/api_host_formatter.dart';
 import '../utils/model_capabilities.dart';
 import 'ai_package_logger.dart';
-import '../models/ai_provider.dart';
+import 'ai_stream_http_client.dart';
+import 'deepseek_thinking_http_client.dart';
 
 /// 流式响应中的事件类型（统一各 SDK 输出）
 sealed class AiChatChunk {
@@ -234,13 +236,33 @@ class AiChatService {
     http.Client? httpClient,
     ChatStreamStats? stats,
   }) async* {
-    final client = _createOpenAIClient(baseUrl, apiKey, httpClient: httpClient);
+    final isDeepSeekV4Flash = ModelCapabilities.isDeepSeekV4Flash(model);
+    DeepSeekThinkingHttpClient? deepSeekClient;
+    http.Client? effectiveHttpClient = httpClient;
+    if (isDeepSeekV4Flash) {
+      final delegate = httpClient ?? bridgedClient ?? AiStreamHttpClient();
+      deepSeekClient = DeepSeekThinkingHttpClient(
+        delegate: delegate,
+        thinkingConfig: thinkingConfig,
+        ownsDelegate: httpClient == null && bridgedClient == null,
+      );
+      effectiveHttpClient = deepSeekClient;
+    }
+
+    final client = _createOpenAIClient(
+      baseUrl,
+      apiKey,
+      httpClient: effectiveHttpClient,
+    );
     try {
       final request = o.ChatCompletionCreateRequest(
         model: model,
         messages: _toOpenAiMessages(systemPrompt, messages),
         streamOptions: const o.StreamOptions(includeUsage: true),
-        reasoningEffort: _toOpenAiReasoningEffort(thinkingConfig),
+        // V4 Flash 的 thinking/reasoning_effort 由
+        // DeepSeekThinkingHttpClient 写入，避免 openai_dart 丢掉专属字段。
+        reasoningEffort:
+            isDeepSeekV4Flash ? null : _toOpenAiReasoningEffort(thinkingConfig),
       );
       int? promptTokens;
       int? responseTokens;
@@ -278,6 +300,7 @@ class AiChatService {
       }
     } finally {
       client.close();
+      deepSeekClient?.close();
     }
   }
 
@@ -1496,6 +1519,9 @@ class AiChatService {
       ThinkingLevel.medium => o.ReasoningEffort.medium,
       ThinkingLevel.high => o.ReasoningEffort.high,
       ThinkingLevel.custom => o.ReasoningEffort.high,
+      // 该等级只在 V4 Flash 菜单中展示；若旧配置被其他 OpenAI 模型读取，
+      // 回退到 SDK 支持的 high。
+      ThinkingLevel.max => o.ReasoningEffort.high,
     };
   }
 
@@ -1514,6 +1540,7 @@ class AiChatService {
         ThinkingLevel.low => g.ThinkingLevel.low,
         ThinkingLevel.medium => g.ThinkingLevel.medium,
         ThinkingLevel.high => g.ThinkingLevel.high,
+        ThinkingLevel.max => g.ThinkingLevel.high,
         _ => g.ThinkingLevel.unspecified,
       },
     );
@@ -1527,6 +1554,8 @@ class AiChatService {
       ThinkingLevel.medium => 8192,
       ThinkingLevel.high => 32000,
       ThinkingLevel.custom => config.customBudget,
+      // max 是 DeepSeek V4 Flash 专属等级，切换到 Anthropic 时兼容到 high。
+      ThinkingLevel.max => 32000,
     };
   }
 }

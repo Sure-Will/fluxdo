@@ -21,7 +21,7 @@ void main() {
           home: Scaffold(
             body: AiChatInput(
               isGenerating: false,
-              onSend: (_, _) {},
+              onSend: (_, _) async => true,
               onStop: () {},
               onEscape: () => escapeCalls++,
             ),

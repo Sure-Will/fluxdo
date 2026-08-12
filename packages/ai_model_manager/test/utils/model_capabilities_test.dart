@@ -5,6 +5,32 @@ import 'package:flutter_test/flutter_test.dart';
 AiModel _bare(String id) => AiModel(id: id);
 
 void main() {
+  group('DeepSeek V4 Flash model matching', () {
+    const flashIds = [
+      'deepseek-v4-flash',
+      'deepseek-v4-flash-0731',
+      'deepseek/deepseek-v4-flash',
+      'DeepSeek-V4-Flash',
+    ];
+    for (final id in flashIds) {
+      test('$id → identified as V4 Flash', () {
+        expect(ModelCapabilities.isDeepSeekV4Flash(id), isTrue);
+      });
+    }
+
+    const nonFlashIds = [
+      'deepseek-v4-pro',
+      'deepseek-v4-flash-pro',
+      'deepseek-chat',
+      'deepseek-r1',
+    ];
+    for (final id in nonFlashIds) {
+      test('$id → not identified as V4 Flash', () {
+        expect(ModelCapabilities.isDeepSeekV4Flash(id), isFalse);
+      });
+    }
+  });
+
   group('ModelCapabilities.infer', () {
     group('vision', () {
       const visionIds = [

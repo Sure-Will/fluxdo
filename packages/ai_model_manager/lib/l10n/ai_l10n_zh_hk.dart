@@ -183,6 +183,8 @@ class AiL10nZhHK extends AiL10n {
   @override
   String get thinkingHigh => '深度思考';
   @override
+  String get thinkingMax => '極限思考';
+  @override
   String get chatHistory => '聊天記錄';
   @override
   String get titleGenerationModel => '標題生成模型';

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -8,11 +9,11 @@ import 'package:app_icons/app_icons.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../l10n/s.dart';
 
-/// 输入框 onSend 回调，携带文本和可选附件
-typedef AiChatInputSend = void Function(
-  String text,
-  List<AiChatAttachment> attachments,
-);
+/// 输入框 onSend 回调，返回是否已接收本次消息。
+///
+/// 上下文仍在加载或加载失败时返回 false，输入内容会保留给用户。
+typedef AiChatInputSend =
+    Future<bool> Function(String text, List<AiChatAttachment> attachments);
 
 /// AI 聊天输入框
 ///
@@ -20,6 +21,7 @@ typedef AiChatInputSend = void Function(
 /// 拍照、相册、切生图全部收纳到 + 号点击后**内嵌展开**的工具区（不弹 sheet）。
 class AiChatInput extends StatefulWidget {
   final bool isGenerating;
+  final bool isContextLoading;
   final AiChatInputSend onSend;
   final VoidCallback onStop;
   final VoidCallback? onEscape;
@@ -49,6 +51,7 @@ class AiChatInput extends StatefulWidget {
     required this.isGenerating,
     required this.onSend,
     required this.onStop,
+    this.isContextLoading = false,
     this.onEscape,
     this.allowAttachments = true,
     this.isImageMode = false,
@@ -71,9 +74,13 @@ class _AiChatInputState extends State<AiChatInput> {
 
   /// 工具区是否展开（+ 号点击切换）
   bool _toolsExpanded = false;
+  bool _isSubmitting = false;
 
   bool get _canSend =>
       _controller.text.trim().isNotEmpty || _pendingAttachments.isNotEmpty;
+
+  bool get _isBusy =>
+      widget.isGenerating || widget.isContextLoading || _isSubmitting;
 
   @override
   void initState() {
@@ -98,14 +105,26 @@ class _AiChatInputState extends State<AiChatInput> {
     super.dispose();
   }
 
-  void _handleSend() {
-    if (widget.isGenerating) return;
+  Future<void> _handleSend() async {
+    if (_isBusy) return;
     final text = _controller.text.trim();
     if (text.isEmpty && _pendingAttachments.isEmpty) return;
-    final attachments = List<AiChatAttachment>.unmodifiable(_pendingAttachments);
-    widget.onSend(text, attachments);
-    _controller.clear();
-    setState(_pendingAttachments.clear);
+    final attachments = List<AiChatAttachment>.unmodifiable(
+      _pendingAttachments,
+    );
+    setState(() => _isSubmitting = true);
+    var accepted = false;
+    try {
+      accepted = await widget.onSend(text, attachments);
+    } catch (_) {
+      // 发送准备失败时保留草稿，交给上层展示可读错误。
+    }
+    if (!mounted) return;
+    if (accepted) {
+      _controller.clear();
+      _pendingAttachments.clear();
+    }
+    setState(() => _isSubmitting = false);
   }
 
   KeyEventResult _handleInputKeyEvent(FocusNode node, KeyEvent event) {
@@ -125,8 +144,8 @@ class _AiChatInputState extends State<AiChatInput> {
     }
 
     // 普通 Enter 的语义始终是发送；不可发送时也不插入空行。
-    if (!widget.isGenerating && _canSend) {
-      _handleSend();
+    if (!_isBusy && _canSend) {
+      unawaited(_handleSend());
     }
     return KeyEventResult.handled;
   }
@@ -142,10 +161,12 @@ class _AiChatInputState extends State<AiChatInput> {
       if (picked == null || !mounted) return;
       final bytes = await File(picked.path).readAsBytes();
       setState(() {
-        _pendingAttachments.add(AiChatAttachment(
-          mimeType: _inferMimeType(picked.path),
-          base64Data: base64Encode(bytes),
-        ));
+        _pendingAttachments.add(
+          AiChatAttachment(
+            mimeType: _inferMimeType(picked.path),
+            base64Data: base64Encode(bytes),
+          ),
+        );
       });
     } catch (_) {
       // 用户取消或权限被拒，静默处理
@@ -217,8 +238,9 @@ class _AiChatInputState extends State<AiChatInput> {
               decoration: InputDecoration(
                 hintText: context.l10n.ai_inputHint,
                 hintStyle: TextStyle(
-                  color: theme.colorScheme.onSurfaceVariant
-                      .withValues(alpha: 0.5),
+                  color: theme.colorScheme.onSurfaceVariant.withValues(
+                    alpha: 0.5,
+                  ),
                 ),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(20),
@@ -257,7 +279,7 @@ class _AiChatInputState extends State<AiChatInput> {
               // + 号：默认无背景，只 hover/按下时才有色调；展开时旋转成 ×。
               // 尺寸跟发送按钮对齐（36×36 + icon 20）
               IconButton(
-                onPressed: widget.isGenerating ? null : _toggleTools,
+                onPressed: _isBusy ? null : _toggleTools,
                 icon: AnimatedRotation(
                   turns: _toolsExpanded ? 0.125 : 0,
                   duration: const Duration(milliseconds: 200),
@@ -288,21 +310,33 @@ class _AiChatInputState extends State<AiChatInput> {
                       tooltip: context.l10n.ai_stopGenerate,
                     )
                   : IconButton.filled(
-                      onPressed: _canSend ? _handleSend : null,
-                      icon: const Icon(Symbols.arrow_upward_rounded, size: 20),
+                      onPressed: _canSend && !_isBusy
+                          ? () => unawaited(_handleSend())
+                          : null,
+                      icon: _isBusy
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Symbols.arrow_upward_rounded, size: 20),
                       style: IconButton.styleFrom(
                         backgroundColor: _canSend
                             ? theme.colorScheme.primary
-                            : theme.colorScheme.onSurface
-                                .withValues(alpha: 0.1),
+                            : theme.colorScheme.onSurface.withValues(
+                                alpha: 0.1,
+                              ),
                         foregroundColor: _canSend
                             ? theme.colorScheme.onPrimary
-                            : theme.colorScheme.onSurfaceVariant
-                                .withValues(alpha: 0.4),
+                            : theme.colorScheme.onSurfaceVariant.withValues(
+                                alpha: 0.4,
+                              ),
                         minimumSize: const Size(36, 36),
                         padding: EdgeInsets.zero,
                       ),
-                      tooltip: context.l10n.ai_sendTooltip,
+                      tooltip: _isBusy
+                          ? context.l10n.common_loading
+                          : context.l10n.ai_sendTooltip,
                     ),
             ],
           ),
@@ -321,7 +355,7 @@ class _AiChatInputState extends State<AiChatInput> {
                           label: context.l10n.ai_toolsCamera,
                           // 非多模态模型 → 视觉置灰（onTap 也是 null 不响应）
                           dimmed: !widget.allowAttachments,
-                          onTap: widget.allowAttachments && !widget.isGenerating
+                          onTap: widget.allowAttachments && !_isBusy
                               ? () {
                                   setState(() => _toolsExpanded = false);
                                   _pickImage(ImageSource.camera);
@@ -333,7 +367,7 @@ class _AiChatInputState extends State<AiChatInput> {
                           icon: Symbols.photo_library_rounded,
                           label: context.l10n.ai_toolsPhotos,
                           dimmed: !widget.allowAttachments,
-                          onTap: widget.allowAttachments && !widget.isGenerating
+                          onTap: widget.allowAttachments && !_isBusy
                               ? () {
                                   setState(() => _toolsExpanded = false);
                                   _pickImage(ImageSource.gallery);
@@ -349,9 +383,9 @@ class _AiChatInputState extends State<AiChatInput> {
                               ? context.l10n.ai_modeBackToChat
                               : context.l10n.ai_modeSwitchToImage,
                           active: widget.isImageMode,
-                          dimmed: !widget.canEnterImageMode &&
-                              !widget.isImageMode,
-                          onTap: widget.onToggleImageMode == null
+                          dimmed:
+                              !widget.canEnterImageMode && !widget.isImageMode,
+                          onTap: widget.onToggleImageMode == null || _isBusy
                               ? null
                               : () {
                                   setState(() => _toolsExpanded = false);
@@ -395,8 +429,8 @@ class _ToolCard extends StatelessWidget {
     final fg = active
         ? theme.colorScheme.onPrimaryContainer
         : (dimmed
-            ? theme.colorScheme.onSurface.withValues(alpha: 0.4)
-            : theme.colorScheme.onSurface);
+              ? theme.colorScheme.onSurface.withValues(alpha: 0.4)
+              : theme.colorScheme.onSurface);
     return Expanded(
       child: SizedBox(
         height: 72,
@@ -459,7 +493,11 @@ class _PendingAttachmentTile extends StatelessWidget {
               customBorder: const CircleBorder(),
               child: const Padding(
                 padding: EdgeInsets.all(2),
-                child: Icon(Symbols.close_rounded, size: 12, color: Colors.white),
+                child: Icon(
+                  Symbols.close_rounded,
+                  size: 12,
+                  color: Colors.white,
+                ),
               ),
             ),
           ),
@@ -478,7 +516,9 @@ class _PendingAttachmentTile extends StatelessWidget {
           height: size,
           fit: BoxFit.cover,
         );
-      } catch (_) {/* fall through */}
+      } catch (_) {
+        /* fall through */
+      }
     }
     final localPath = attachment.localPath;
     if (localPath != null && localPath.isNotEmpty) {

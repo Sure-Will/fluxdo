@@ -12,6 +12,8 @@ void main() {
   Future<List<String>> pumpInput(
     WidgetTester tester, {
     bool isGenerating = false,
+    bool isContextLoading = false,
+    bool acceptSend = true,
   }) async {
     final sent = <String>[];
     await tester.pumpWidget(
@@ -26,8 +28,10 @@ void main() {
           home: Scaffold(
             body: AiChatInput(
               isGenerating: isGenerating,
-              onSend: (text, List<AiChatAttachment> attachments) {
+              isContextLoading: isContextLoading,
+              onSend: (text, List<AiChatAttachment> attachments) async {
                 sent.add(text);
+                return acceptSend;
               },
               onStop: () {},
             ),
@@ -35,7 +39,8 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    // 加载态包含无限循环的进度指示器，不能用 pumpAndSettle。
+    await tester.pump();
     return sent;
   }
 
@@ -46,7 +51,7 @@ void main() {
     await tester.tap(field);
     await tester.enterText(field, 'hello');
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(sent, ['hello']);
     expect(tester.widget<TextField>(field).controller!.text, isEmpty);
@@ -91,7 +96,7 @@ void main() {
     );
     await tester.pump();
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(sent, isEmpty);
 
@@ -102,7 +107,7 @@ void main() {
       ),
     );
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(sent, ['你']);
   });
 
@@ -113,9 +118,36 @@ void main() {
     await tester.tap(field);
     await tester.enterText(field, '下一条');
     await tester.sendKeyEvent(LogicalKeyboardKey.enter);
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(sent, isEmpty);
     expect(tester.widget<TextField>(field).controller!.text, '下一条');
+  });
+
+  testWidgets('上下文加载期间不发送，且保留输入草稿', (tester) async {
+    final sent = await pumpInput(tester, isContextLoading: true);
+    final field = find.byType(TextField);
+
+    await tester.tap(field);
+    await tester.enterText(field, '等全部帖子加载完再发');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+
+    expect(sent, isEmpty);
+    expect(tester.widget<TextField>(field).controller!.text, '等全部帖子加载完再发');
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+  });
+
+  testWidgets('上层未接收消息时保留输入草稿', (tester) async {
+    final sent = await pumpInput(tester, acceptSend: false);
+    final field = find.byType(TextField);
+
+    await tester.tap(field);
+    await tester.enterText(field, '加载失败后仍可重试');
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+
+    expect(sent, ['加载失败后仍可重试']);
+    expect(tester.widget<TextField>(field).controller!.text, '加载失败后仍可重试');
   });
 }

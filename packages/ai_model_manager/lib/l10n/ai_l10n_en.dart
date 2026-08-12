@@ -188,6 +188,8 @@ class AiL10nEn extends AiL10n {
   @override
   String get thinkingHigh => 'Deep';
   @override
+  String get thinkingMax => 'Maximum';
+  @override
   String get chatHistory => 'Chat History';
   @override
   String get titleGenerationModel => 'Title Generation Model';
