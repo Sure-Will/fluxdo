@@ -44,6 +44,11 @@ String? applyImageScaleToRaw(String raw, ImageRun image, int scale) {
 class MarkdownBody extends StatefulWidget {
   final String data;
 
+  /// 是否允许用户选择并复制渲染后的文本。
+  ///
+  /// 默认关闭，避免编辑器预览等交互场景改变手势行为；只读内容可按需开启。
+  final bool selectionEnabled;
+
   /// 内部链接点击回调（话题链接）
   final void Function(int topicId, String? topicSlug, int? postNumber)?
   onInternalLinkTap;
@@ -56,6 +61,7 @@ class MarkdownBody extends StatefulWidget {
   const MarkdownBody({
     super.key,
     required this.data,
+    this.selectionEnabled = false,
     this.onInternalLinkTap,
     this.onImageScaleChanged,
   });
@@ -167,7 +173,7 @@ class _MarkdownBodyState extends State<MarkdownBody> {
       baseTextStyle: Theme.of(
         context,
       ).textTheme.bodyMedium?.copyWith(height: 1.5),
-      selectionEnabled: false,
+      selectionEnabled: widget.selectionEnabled,
     );
   }
 

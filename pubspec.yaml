@@ -1,7 +1,7 @@
 name: fluxdo
 description: "A new Flutter project."
 publish_to: 'none'
-version: 0.2.27+2026081217
+version: 0.2.26-sure.1+2026081416
 
 environment:
   sdk: ^3.10.4
@@ -255,7 +255,6 @@ flutter:
         # Flutter 3.41+ FontWeight 会映射到 wght variation axis，因此即使
         # 不显式声明 weight，TextStyle(fontWeight: FontWeight.wXXX) 也能精准命中。
         - asset: assets/fonts/MiSansVF.ttf
-
 
 
 

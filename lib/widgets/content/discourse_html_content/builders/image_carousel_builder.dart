@@ -7,6 +7,7 @@ import 'package:app_icons/app_icons.dart';
 import 'package:m3e_ui/m3e_ui.dart';
 import '../../../../services/discourse_cache_manager.dart';
 import '../../../../services/image_decode_spec_memo.dart';
+import '../../../common/page_aware_image.dart';
 import '../image_utils.dart';
 import 'image_grid_builder.dart';
 
@@ -354,38 +355,44 @@ class _CarouselSlideState extends State<_CarouselSlide>
         tag: heroTag,
         // Android 预测返回是 user gesture 转场,须显式开启才有飞行
         transitionOnUserGestures: true,
-        child: Image(
-          image: ResizeImage(
-            discourseImageProvider(url),
-            width: cacheWidth,
-            height: cacheHeight,
-            policy: ResizeImagePolicy.fit,
+        child: PageAwareImage(
+          inactiveBuilder: (_) => SizedBox(
+            width: double.infinity,
+            height: widget.carouselHeight,
           ),
-          fit: BoxFit.contain,
-          width: double.infinity,
-          height: widget.carouselHeight,
-          loadingBuilder: (context, child, loadingProgress) {
-            if (loadingProgress == null) return child;
-            final total = loadingProgress.expectedTotalBytes;
-            // 无总长 = 不定态用 LoadingSpinner;有进度走 wavy 圆环
-            return Center(
-              child: total != null
-                  ? M3eCircularProgress(
-                      value: loadingProgress.cumulativeBytesLoaded / total,
-                      size: 24,
-                      strokeWidth: 2,
-                    )
-                  : const LoadingSpinner(size: 24),
-            );
-          },
-          errorBuilder: (context, error, stackTrace) {
-            return Center(
-              child: Icon(
-                Symbols.broken_image_rounded,
-                color: widget.theme.colorScheme.outline,
-              ),
-            );
-          },
+          builder: (_) => Image(
+            image: ResizeImage(
+              discourseImageProvider(url),
+              width: cacheWidth,
+              height: cacheHeight,
+              policy: ResizeImagePolicy.fit,
+            ),
+            fit: BoxFit.contain,
+            width: double.infinity,
+            height: widget.carouselHeight,
+            loadingBuilder: (context, child, loadingProgress) {
+              if (loadingProgress == null) return child;
+              final total = loadingProgress.expectedTotalBytes;
+              // 无总长 = 不定态用 LoadingSpinner;有进度走 wavy 圆环
+              return Center(
+                child: total != null
+                    ? M3eCircularProgress(
+                        value: loadingProgress.cumulativeBytesLoaded / total,
+                        size: 24,
+                        strokeWidth: 2,
+                      )
+                    : const LoadingSpinner(size: 24),
+              );
+            },
+            errorBuilder: (context, error, stackTrace) {
+              return Center(
+                child: Icon(
+                  Symbols.broken_image_rounded,
+                  color: widget.theme.colorScheme.outline,
+                ),
+              );
+            },
+          ),
         ),
       ),
     );

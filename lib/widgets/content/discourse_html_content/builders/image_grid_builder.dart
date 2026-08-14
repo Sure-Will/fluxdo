@@ -5,6 +5,7 @@ import 'package:m3e_ui/m3e_ui.dart';
 import '../../../../services/discourse_cache_manager.dart';
 import '../../../../services/image_decode_spec_memo.dart';
 import '../../../../utils/url_helper.dart';
+import '../../../common/page_aware_image.dart';
 import '../image_utils.dart';
 import '../../lazy_load_scope.dart';
 import 'image_carousel_builder.dart';
@@ -278,47 +279,53 @@ class _GridImageTileState extends State<_GridImageTile> {
             // RepaintBoundary:加载 spinner 动画/首绘隔离在格子内,
             // 不连带整个帖子 segment 每帧重绘
             child: RepaintBoundary(
-              child: Image(
-                image: ResizeImage(
-                  discourseImageProvider(displayUrl),
-                  width: cachePx,
-                  height: cachePx,
-                  policy: ResizeImagePolicy.fit,
+              child: PageAwareImage(
+                inactiveBuilder: (_) => SizedBox(
+                  width: widget.columnWidth,
+                  height: displayHeight,
                 ),
-                fit: BoxFit.cover,
-                width: widget.columnWidth,
-                height: displayHeight,
-                gaplessPlayback: true,
-                loadingBuilder: (context, child, loadingProgress) {
-                  if (loadingProgress == null) return child;
-                  final total = loadingProgress.expectedTotalBytes;
-                  // 无总长 = 不定态用 LoadingSpinner;有进度走 wavy 圆环
-                  return Container(
-                    color: widget.theme.colorScheme.surfaceContainerHighest,
-                    child: Center(
-                      child: RepaintBoundary(
-                        child: total != null
-                            ? M3eCircularProgress(
-                                value:
-                                    loadingProgress.cumulativeBytesLoaded /
-                                        total,
-                                size: 24,
-                                strokeWidth: 2,
-                              )
-                            : const LoadingSpinner(size: 24),
+                builder: (_) => Image(
+                  image: ResizeImage(
+                    discourseImageProvider(displayUrl),
+                    width: cachePx,
+                    height: cachePx,
+                    policy: ResizeImagePolicy.fit,
+                  ),
+                  fit: BoxFit.cover,
+                  width: widget.columnWidth,
+                  height: displayHeight,
+                  gaplessPlayback: true,
+                  loadingBuilder: (context, child, loadingProgress) {
+                    if (loadingProgress == null) return child;
+                    final total = loadingProgress.expectedTotalBytes;
+                    // 无总长 = 不定态用 LoadingSpinner;有进度走 wavy 圆环
+                    return Container(
+                      color: widget.theme.colorScheme.surfaceContainerHighest,
+                      child: Center(
+                        child: RepaintBoundary(
+                          child: total != null
+                              ? M3eCircularProgress(
+                                  value:
+                                      loadingProgress.cumulativeBytesLoaded /
+                                          total,
+                                  size: 24,
+                                  strokeWidth: 2,
+                                )
+                              : const LoadingSpinner(size: 24),
+                        ),
                       ),
-                    ),
-                  );
-                },
-                errorBuilder: (context, error, stackTrace) {
-                  return Container(
-                    color: widget.theme.colorScheme.surfaceContainerHighest,
-                    child: Icon(
-                      Symbols.broken_image_rounded,
-                      color: widget.theme.colorScheme.outline,
-                    ),
-                  );
-                },
+                    );
+                  },
+                  errorBuilder: (context, error, stackTrace) {
+                    return Container(
+                      color: widget.theme.colorScheme.surfaceContainerHighest,
+                      child: Icon(
+                        Symbols.broken_image_rounded,
+                        color: widget.theme.colorScheme.outline,
+                      ),
+                    );
+                  },
+                ),
               ),
             ),
           ),
@@ -402,5 +409,4 @@ class GridImageData {
     this.height,
   });
 }
-
 

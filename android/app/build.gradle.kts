@@ -14,6 +14,9 @@ plugins {
 fun Properties.readNonBlank(name: String): String? =
     getProperty(name)?.trim()?.takeIf { it.isNotEmpty() }
 
+fun readEnvironmentNonBlank(name: String): String? =
+    System.getenv(name)?.trim()?.takeIf { it.isNotEmpty() }
+
 fun resolveStoreFile(pathValue: String?): File? {
     val normalized = pathValue?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     val directFile = File(normalized)
@@ -34,15 +37,32 @@ val keystoreProperties = Properties().apply {
         load(keystorePropertiesFile.inputStream())
     }
 }
-val releaseKeyAlias = keystoreProperties.readNonBlank("keyAlias")
-val releaseKeyPassword = keystoreProperties.readNonBlank("keyPassword")
-val releaseStorePassword = keystoreProperties.readNonBlank("storePassword")
-val releaseStoreFile = resolveStoreFile(keystoreProperties.readNonBlank("storeFile"))
+val releaseKeyAlias =
+    keystoreProperties.readNonBlank("keyAlias")
+        ?: readEnvironmentNonBlank("FLUXDO_ANDROID_KEY_ALIAS")
+val releaseKeyPassword =
+    keystoreProperties.readNonBlank("keyPassword")
+        ?: readEnvironmentNonBlank("FLUXDO_ANDROID_KEY_PASSWORD")
+val releaseStorePassword =
+    keystoreProperties.readNonBlank("storePassword")
+        ?: readEnvironmentNonBlank("FLUXDO_ANDROID_STORE_PASSWORD")
+val releaseStoreFile = resolveStoreFile(
+    keystoreProperties.readNonBlank("storeFile")
+        ?: readEnvironmentNonBlank("FLUXDO_ANDROID_STORE_FILE"),
+)
 val hasReleaseSigning =
     releaseKeyAlias != null &&
     releaseKeyPassword != null &&
     releaseStorePassword != null &&
     releaseStoreFile?.exists() == true
+val requireReleaseSigning =
+    readEnvironmentNonBlank("FLUXDO_REQUIRE_RELEASE_SIGNING")
+        ?.equals("true", ignoreCase = true) == true
+if (requireReleaseSigning && !hasReleaseSigning) {
+    throw GradleException(
+        "FLUXDO_REQUIRE_RELEASE_SIGNING=true but Android release signing is incomplete",
+    )
+}
 val releaseBuildSigningName = if (hasReleaseSigning) "release" else "debug"
 
 println(

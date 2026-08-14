@@ -23,7 +23,7 @@ void main() {
     expect(limits.maximumEntries, 30000);
   });
 
-  test('只有 resumed 的当前页启用 ticker', () {
+  test('resumed 和短暂 inactive 的当前页启用 ticker', () {
     expect(
       AppMemoryPolicy.shouldEnablePageTickers(
         lifecycleState: AppLifecycleState.resumed,
@@ -43,7 +43,7 @@ void main() {
         lifecycleState: AppLifecycleState.inactive,
         isActivePage: true,
       ),
-      isFalse,
+      isTrue,
     );
     expect(
       AppMemoryPolicy.shouldEnablePageTickers(
@@ -57,10 +57,10 @@ void main() {
   testWidgets('页面门控向子树暴露计算后的 ticker 状态', (tester) async {
     bool? enabled;
 
-    Widget buildGate(AppLifecycleState state) {
+    Widget buildGate(AppLifecycleState state, {bool isActivePage = true}) {
       return AppPageTickerGate(
         lifecycleState: state,
-        isActivePage: true,
+        isActivePage: isActivePage,
         child: Builder(
           builder: (context) {
             enabled = TickerMode.valuesOf(context).enabled;
@@ -71,9 +71,21 @@ void main() {
     }
 
     await tester.pumpWidget(buildGate(AppLifecycleState.inactive));
+    expect(enabled, isTrue);
+
+    await tester.pumpWidget(buildGate(AppLifecycleState.hidden));
     expect(enabled, isFalse);
 
     await tester.pumpWidget(buildGate(AppLifecycleState.resumed));
     expect(enabled, isTrue);
+
+    await tester.pumpWidget(
+      buildGate(AppLifecycleState.resumed, isActivePage: false),
+    );
+    expect(enabled, isFalse);
+    expect(
+      tester.widget<ExcludeFocus>(find.byType(ExcludeFocus)).excluding,
+      isTrue,
+    );
   });
 }

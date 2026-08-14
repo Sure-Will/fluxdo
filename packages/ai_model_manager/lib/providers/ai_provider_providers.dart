@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
@@ -166,14 +167,26 @@ Future<void> clearDefaultAiModel(
 class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
   static const String _storageKey = 'ai_providers';
   static const String _kApiKeyPrefix = 'ai_apikey_';
+  static const String _kStagedApiKeyPrefix = 'ai_apikey_staged_';
   static const String _kLegacyKeychainPrefix = 'ai_provider_key_';
   static const String _kLegacyFallbackPrefix =
       '__secure_fallback__ai_provider_key_';
+  static const String _kPendingSecretTransactions =
+      'ai_provider_secret_transactions_v1';
+  static const String _kMacOsKeychainService =
+      'com.surewill.fluxdo.ai-secrets.v1';
   static const _uuid = Uuid();
+  static final Set<String> _blockedProviderIds = <String>{};
 
-  /// 老 Keychain 数据迁移源,仅用于把历史用户存在 Keychain 里的 apiKey
-  /// 一次性搬到 SharedPreferences。迁移完即不再使用,下个大版本可彻底
-  /// 移除 flutter_secure_storage 依赖。
+  static const FlutterSecureStorage _apiKeyStorage = FlutterSecureStorage(
+    mOptions: MacOsOptions(
+      accountName: _kMacOsKeychainService,
+      usesDataProtectionKeychain: false,
+    ),
+  );
+
+  /// 老 Keychain 数据只在非 macOS 平台迁移。macOS 的旧 adhoc ACL 会弹
+  /// 授权框，因此稳定签名版使用全新 service，完全不查询旧 service。
   static const FlutterSecureStorage _legacyKeychain = FlutterSecureStorage(
     mOptions: MacOsOptions(usesDataProtectionKeychain: false),
   );
@@ -181,9 +194,15 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
       kIsWeb || defaultTargetPlatform != TargetPlatform.macOS;
 
   final SharedPreferences _prefs;
+  Future<void> _journalTail = Future<void>.value();
+  Future<void> _mutationTail = Future<void>.value();
+  late final Future<void> _secretRecovery;
 
   AiProviderListNotifier(this._prefs) : super([]) {
+    _blockedProviderIds.addAll(_readSecretJournal().keys);
     _load();
+    _secretRecovery = _recoverPendingSecretTransactions();
+    unawaited(_secretRecovery);
   }
 
   void _load() {
@@ -201,7 +220,11 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
 
   Future<void> _save() async {
     final json = state.map((p) => p.toJson()).toList();
-    await _prefs.setString(_storageKey, jsonEncode(json));
+    final encoded = jsonEncode(json);
+    final saved = await _prefs.setString(_storageKey, encoded);
+    if (!saved || _prefs.getString(_storageKey) != encoded) {
+      throw StateError('AI provider metadata persistence failed');
+    }
   }
 
   /// 添加供应商，返回新供应商 id
@@ -211,21 +234,40 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
     required String baseUrl,
     required String apiKey,
     List<AiModel> models = const [],
-  }) async {
-    final id = _uuid.v4();
-    final provider = AiProvider(
-      id: id,
-      name: name,
-      type: type,
-      baseUrl: baseUrl,
-      models: _inferAll(models),
-      pinned: false,
-    );
-    state = [...state, provider];
-    await _save();
-    await _saveApiKey(id, apiKey);
-    return id;
-  }
+  }) =>
+      _withMutationLock(() async {
+        await _secretRecovery;
+        final id = _uuid.v4();
+        final provider = AiProvider(
+          id: id,
+          name: name,
+          type: type,
+          baseUrl: baseUrl,
+          models: _inferAll(models),
+          pinned: false,
+        );
+        await _beginSecretTransaction(id, expectedProvider: provider);
+        try {
+          await _stageApiKey(id, apiKey);
+        } catch (error, stackTrace) {
+          await _discardStagedApiKey(id);
+          await _finishSecretTransaction(id);
+          Error.throwWithStackTrace(error, stackTrace);
+        }
+        final previousState = state;
+        state = [...state, provider];
+        try {
+          await _save();
+        } catch (_) {
+          state = previousState;
+          await _discardStagedApiKey(id);
+          await _finishSecretTransaction(id);
+          rethrow;
+        }
+        await _commitStagedApiKey(id, deleteSecret: apiKey.trim().isEmpty);
+        await _finishSecretTransaction(id);
+        return id;
+      });
 
   /// 更新供应商
   Future<void> updateProvider({
@@ -235,74 +277,161 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
     String? baseUrl,
     String? apiKey,
     List<AiModel>? models,
-  }) async {
-    state = state.map((p) {
-      if (p.id != id) return p;
-      return p.copyWith(
-        name: name,
-        type: type,
-        baseUrl: baseUrl,
-        models: models,
-      );
-    }).toList();
-    await _save();
-    if (apiKey != null) {
-      await _saveApiKey(id, apiKey);
-    }
-  }
+  }) =>
+      _withMutationLock(() async {
+        await _secretRecovery;
+        _ensureProviderSecretReady(id);
+        if (!state.any((provider) => provider.id == id)) return;
+        final previousState = state;
+        final nextState = state.map((p) {
+          if (p.id != id) return p;
+          return p.copyWith(
+            name: name,
+            type: type,
+            baseUrl: baseUrl,
+            models: models,
+          );
+        }).toList();
+        final expectedProvider =
+            nextState.firstWhere((provider) => provider.id == id);
+        if (apiKey != null) {
+          await _beginSecretTransaction(
+            id,
+            expectedProvider: expectedProvider,
+            deleteSecret: apiKey.trim().isEmpty,
+          );
+          try {
+            await _stageApiKey(id, apiKey);
+          } catch (error, stackTrace) {
+            await _discardStagedApiKey(id);
+            await _finishSecretTransaction(id);
+            Error.throwWithStackTrace(error, stackTrace);
+          }
+        }
+        state = nextState;
+        try {
+          await _save();
+        } catch (_) {
+          state = previousState;
+          if (apiKey != null) {
+            await _discardStagedApiKey(id);
+            await _finishSecretTransaction(id);
+          }
+          rethrow;
+        }
+        if (apiKey != null) {
+          await _commitStagedApiKey(id, deleteSecret: apiKey.trim().isEmpty);
+          await _finishSecretTransaction(id);
+        }
+      });
 
   /// 删除供应商
-  Future<void> removeProvider(String id) async {
-    state = state.where((p) => p.id != id).toList();
-    await _save();
-    await _deleteApiKey(id);
-  }
+  Future<void> removeProvider(String id) => _withMutationLock(() async {
+        await _secretRecovery;
+        _ensureProviderSecretReady(id);
+        if (!state.any((provider) => provider.id == id)) return;
+        await _beginSecretTransaction(id);
+        final previousState = state;
+        state = state.where((p) => p.id != id).toList();
+        try {
+          await _save();
+        } catch (_) {
+          state = previousState;
+          await _finishSecretTransaction(id);
+          rethrow;
+        }
+        await _deleteApiKey(id);
+        await _finishSecretTransaction(id);
+      });
 
   /// 批量删除供应商，并同步清理 API Key。
-  Future<void> removeProviders(Iterable<String> ids) async {
-    final idSet = ids.toSet();
-    if (idSet.isEmpty) return;
-    state = state.where((p) => !idSet.contains(p.id)).toList();
-    await _save();
-    await Future.wait(idSet.map(_deleteApiKey));
-  }
+  Future<void> removeProviders(Iterable<String> ids) =>
+      _withMutationLock(() async {
+        await _secretRecovery;
+        final existingIds = state.map((provider) => provider.id).toSet();
+        final idSet = ids.toSet().intersection(existingIds);
+        if (idSet.isEmpty) return;
+        for (final id in idSet) {
+          _ensureProviderSecretReady(id);
+        }
+        for (final id in idSet) {
+          await _beginSecretTransaction(id);
+        }
+        final previousState = state;
+        state = state.where((p) => !idSet.contains(p.id)).toList();
+        try {
+          await _save();
+        } catch (_) {
+          state = previousState;
+          for (final id in idSet) {
+            await _finishSecretTransaction(id);
+          }
+          rethrow;
+        }
+        final failures = <Object>[];
+        for (final id in idSet) {
+          try {
+            await _deleteApiKey(id);
+            await _finishSecretTransaction(id);
+          } catch (error) {
+            failures.add(error);
+          }
+        }
+        if (failures.isNotEmpty) {
+          throw StateError(
+            'Failed to delete ${failures.length} AI provider secret(s); '
+            'cleanup has been queued',
+          );
+        }
+      });
 
   /// 更新模型列表
-  Future<void> updateModels(String id, List<AiModel> models) async {
-    state = state.map((p) {
-      if (p.id != id) return p;
-      return p.copyWith(models: _inferAll(models));
-    }).toList();
-    await _save();
-  }
+  Future<void> updateModels(String id, List<AiModel> models) =>
+      _withMutationLock(() async {
+        await _secretRecovery;
+        _ensureProviderSecretReady(id);
+        state = state.map((p) {
+          if (p.id != id) return p;
+          return p.copyWith(models: _inferAll(models));
+        }).toList();
+        await _save();
+      });
 
   /// 切换置顶状态。
   ///
   /// - 未置顶 -> 插到置顶区最前
   /// - 已置顶 -> 取消置顶并移到普通区最后
-  Future<void> togglePin(String id) async {
-    final index = state.indexWhere((p) => p.id == id);
-    if (index == -1) return;
-    final provider = state[index];
-    final next = [...state]..removeAt(index);
-    if (provider.pinned) {
-      next.add(provider.copyWith(pinned: false));
-    } else {
-      next.insert(0, provider.copyWith(pinned: true));
-    }
-    state = next;
-    await _save();
-  }
+  Future<void> togglePin(String id) => _withMutationLock(() async {
+        await _secretRecovery;
+        _ensureProviderSecretReady(id);
+        final index = state.indexWhere((p) => p.id == id);
+        if (index == -1) return;
+        final provider = state[index];
+        final next = [...state]..removeAt(index);
+        if (provider.pinned) {
+          next.add(provider.copyWith(pinned: false));
+        } else {
+          next.insert(0, provider.copyWith(pinned: true));
+        }
+        state = next;
+        await _save();
+      });
 
   /// 仅重排序置顶区内部顺序。
-  Future<void> reorderPinned(int oldIndex, int newIndex) async {
-    await _reorderByPinned(true, oldIndex, newIndex);
-  }
+  Future<void> reorderPinned(int oldIndex, int newIndex) =>
+      _withMutationLock(() async {
+        await _secretRecovery;
+        _ensureAllProviderSecretsReady();
+        await _reorderByPinned(true, oldIndex, newIndex);
+      });
 
   /// 仅重排普通区内部顺序。
-  Future<void> reorderUnpinned(int oldIndex, int newIndex) async {
-    await _reorderByPinned(false, oldIndex, newIndex);
-  }
+  Future<void> reorderUnpinned(int oldIndex, int newIndex) =>
+      _withMutationLock(() async {
+        await _secretRecovery;
+        _ensureAllProviderSecretsReady();
+        await _reorderByPinned(false, oldIndex, newIndex);
+      });
 
   Future<void> _reorderByPinned(bool pinned, int oldIndex, int newIndex) async {
     final pinnedItems =
@@ -332,28 +461,37 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
 
   /// 获取 API Key。
   ///
-  /// 优先读 SharedPreferences 明文(新主存)；没有则尝试从老 Keychain 或
-  /// 之前的 prefs fallback 一次性迁移过来,迁移后立刻清掉老位置。
-  ///
-  /// 切明文的理由参见 [_saveApiKey] 注释。
+  /// 优先读独立安全存储；过渡期 SharedPreferences 明文或历史 fallback
+  /// 只作为一次性迁移源，写入安全存储并读回验证后立即删除。
   static Future<String?> getApiKey(String providerId) async {
-    final prefs = await SharedPreferences.getInstance();
-    final plain = prefs.getString('$_kApiKeyPrefix$providerId');
-    if (plain != null) {
-      final trimmed = plain.trim();
-      if (trimmed.isNotEmpty) return trimmed;
+    if (_blockedProviderIds.contains(providerId)) return null;
+    final storageKey = '$_kApiKeyPrefix$providerId';
+    final secure = await _apiKeyStorage.read(key: storageKey);
+    if (_blockedProviderIds.contains(providerId)) return null;
+    if (secure != null && secure.trim().isNotEmpty) {
+      final prefs = await SharedPreferences.getInstance();
+      await _removePreferenceKey(prefs, storageKey);
+      await _removePreferenceKey(
+        prefs,
+        '$_kLegacyFallbackPrefix$providerId',
+      );
+      return secure.trim();
     }
-    return _migrateLegacyApiKey(providerId, prefs);
+    final prefs = await SharedPreferences.getInstance();
+    final migrated = await _migrateLegacyApiKey(providerId, prefs);
+    return _blockedProviderIds.contains(providerId) ? null : migrated;
   }
 
-  /// 一次性迁移:从老 Keychain / 之前的 prefs fallback 拿到 apiKey 后
-  /// 写到新 key,清掉老位置。老用户升级后第一次用 AI 时触发,后续直接走 prefs。
+  /// 一次性迁移：优先读取当前明文，再看可安全访问的旧 Keychain 与历史
+  /// fallback。新 Keychain 读回一致后才删除迁移源。
   static Future<String?> _migrateLegacyApiKey(
     String providerId,
     SharedPreferences prefs,
   ) async {
-    String? value;
-    if (_canAccessLegacyKeychain) {
+    final storageKey = '$_kApiKeyPrefix$providerId';
+    String? value = prefs.getString(storageKey)?.trim();
+    if (value?.isEmpty == true) value = null;
+    if (value == null && _canAccessLegacyKeychain) {
       try {
         final fromKeychain = await _legacyKeychain.read(
           key: '$_kLegacyKeychainPrefix$providerId',
@@ -375,8 +513,13 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
     }
     if (value == null) return null;
 
-    await prefs.setString('$_kApiKeyPrefix$providerId', value);
-    await prefs.remove('$_kLegacyFallbackPrefix$providerId');
+    await _apiKeyStorage.write(key: storageKey, value: value);
+    final verified = await _apiKeyStorage.read(key: storageKey);
+    if (verified != value) {
+      throw StateError('AI API Key migration verification failed');
+    }
+    await _removePreferenceKey(prefs, storageKey);
+    await _removePreferenceKey(prefs, '$_kLegacyFallbackPrefix$providerId');
     if (_canAccessLegacyKeychain) {
       try {
         await _legacyKeychain.delete(key: '$_kLegacyKeychainPrefix$providerId');
@@ -387,12 +530,7 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
     return value;
   }
 
-  /// 保存 API Key 到 SharedPreferences 明文。
-  ///
-  /// 跟业界主流 AI 客户端(Cherry Studio / LobeChat / ChatBox / Kelivo /
-  /// AnythingLLM)一致:apiKey 跟 baseUrl 同等敏感,放同档存储,无需 Keychain
-  /// 加密。Keychain 在 iOS 自签 / macOS 不签名场景下会失效,反而引入「未收到
-  /// AI 回复」类故障——业界都不挡这条路。
+  /// 保存 API Key 到平台安全存储；不允许静默降级为明文。
   static Future<void> _saveApiKey(String providerId, String apiKey) async {
     final trimmed = apiKey.trim();
     if (trimmed.isEmpty) {
@@ -401,9 +539,10 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
       return;
     }
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('$_kApiKeyPrefix$providerId', trimmed);
-    // 顺便清掉老位置,避免新老两份 apiKey 共存导致迁移逻辑下次还跑
-    await prefs.remove('$_kLegacyFallbackPrefix$providerId');
+    final storageKey = '$_kApiKeyPrefix$providerId';
+    await _apiKeyStorage.write(key: storageKey, value: trimmed);
+    await _removePreferenceKey(prefs, storageKey);
+    await _removePreferenceKey(prefs, '$_kLegacyFallbackPrefix$providerId');
     if (_canAccessLegacyKeychain) {
       try {
         await _legacyKeychain.delete(key: '$_kLegacyKeychainPrefix$providerId');
@@ -413,12 +552,222 @@ class AiProviderListNotifier extends StateNotifier<List<AiProvider>> {
 
   static Future<void> _deleteApiKey(String providerId) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove('$_kApiKeyPrefix$providerId');
-    await prefs.remove('$_kLegacyFallbackPrefix$providerId');
+    final storageKey = '$_kApiKeyPrefix$providerId';
+    await _removePreferenceKey(prefs, storageKey);
+    await _removePreferenceKey(prefs, '$_kLegacyFallbackPrefix$providerId');
     if (_canAccessLegacyKeychain) {
       try {
         await _legacyKeychain.delete(key: '$_kLegacyKeychainPrefix$providerId');
       } catch (_) {}
+    }
+    await _apiKeyStorage.delete(key: storageKey);
+  }
+
+  static Future<void> _stageApiKey(String providerId, String apiKey) async {
+    final stagedKey = '$_kStagedApiKeyPrefix$providerId';
+    final value = apiKey.trim();
+    if (value.isEmpty) {
+      await _apiKeyStorage.delete(key: stagedKey);
+      return;
+    }
+    await _apiKeyStorage.write(key: stagedKey, value: value);
+    if (await _apiKeyStorage.read(key: stagedKey) != value) {
+      throw StateError('AI API Key staging verification failed');
+    }
+  }
+
+  static Future<void> _discardStagedApiKey(String providerId) async {
+    final stagedKey = '$_kStagedApiKeyPrefix$providerId';
+    await _apiKeyStorage.delete(key: stagedKey);
+    if (await _apiKeyStorage.read(key: stagedKey) != null) {
+      throw StateError('AI API Key staging cleanup failed');
+    }
+  }
+
+  static Future<void> _commitStagedApiKey(
+    String providerId, {
+    required bool deleteSecret,
+  }) async {
+    if (deleteSecret) {
+      await _deleteApiKey(providerId);
+      await _discardStagedApiKey(providerId);
+      return;
+    }
+    final stagedKey = '$_kStagedApiKeyPrefix$providerId';
+    final staged = await _apiKeyStorage.read(key: stagedKey);
+    if (staged == null || staged.trim().isEmpty) {
+      // 已写入正式槽后、清理临时槽前崩溃时，临时槽可能已经不存在。
+      final committed = await _apiKeyStorage.read(
+        key: '$_kApiKeyPrefix$providerId',
+      );
+      if (committed == null || committed.trim().isEmpty) {
+        throw StateError('AI API Key staging value is missing');
+      }
+      return;
+    }
+    await _saveApiKey(providerId, staged);
+    final committed = await _apiKeyStorage.read(
+      key: '$_kApiKeyPrefix$providerId',
+    );
+    if (committed != staged) {
+      throw StateError('AI API Key commit verification failed');
+    }
+    await _discardStagedApiKey(providerId);
+  }
+
+  Future<void> _beginSecretTransaction(
+    String providerId, {
+    AiProvider? expectedProvider,
+    bool deleteSecret = false,
+  }) =>
+      _withJournalLock(() async {
+        final journal = _readSecretJournal();
+        journal[providerId] = {
+          'op': expectedProvider == null ? 'remove' : 'upsert',
+          if (expectedProvider != null) 'expected': expectedProvider.toJson(),
+          if (expectedProvider != null) 'deleteSecret': deleteSecret,
+        };
+        await _persistSecretJournal(journal);
+        _blockedProviderIds.add(providerId);
+      });
+
+  Future<void> _finishSecretTransaction(String providerId) =>
+      _withJournalLock(() async {
+        final journal = _readSecretJournal()..remove(providerId);
+        await _persistSecretJournal(journal);
+        _blockedProviderIds.remove(providerId);
+      });
+
+  Future<void> _recoverPendingSecretTransactions() async {
+    final journal = await _withJournalLock(_readSecretJournal);
+    for (final entry in journal.entries) {
+      final providerId = entry.key;
+      final record = entry.value;
+      final current =
+          state.where((provider) => provider.id == providerId).firstOrNull;
+      if (record['op'] == 'upsert') {
+        final expected = record['expected'];
+        final committed = current != null &&
+            expected is Map<String, dynamic> &&
+            jsonEncode(current.toJson()) == jsonEncode(expected);
+        if (committed) {
+          try {
+            await _commitStagedApiKey(
+              providerId,
+              deleteSecret: record['deleteSecret'] == true,
+            );
+          } catch (error) {
+            debugPrint('[AiProvider] 恢复已提交的 API Key 失败 $providerId: $error');
+            continue;
+          }
+          await _finishSecretTransaction(providerId);
+          continue;
+        }
+        // 元数据尚未提交：正式 Key 从未被覆盖，丢弃 staging 后保留旧配置。
+        try {
+          await _discardStagedApiKey(providerId);
+          await _finishSecretTransaction(providerId);
+        } catch (error) {
+          debugPrint('[AiProvider] 回滚未提交的 API Key 失败 $providerId: $error');
+        }
+        continue;
+      } else if (current != null) {
+        // remove 的元数据提交尚未发生，Key 仍属于有效 provider。
+        await _finishSecretTransaction(providerId);
+        continue;
+      }
+      try {
+        await _deleteApiKey(providerId);
+        await _discardStagedApiKey(providerId);
+        await _finishSecretTransaction(providerId);
+      } catch (error) {
+        debugPrint('[AiProvider] 恢复未完成的密钥事务失败 $providerId: $error');
+      }
+    }
+  }
+
+  Map<String, Map<String, dynamic>> _readSecretJournal() {
+    final raw = _prefs.getString(_kPendingSecretTransactions);
+    if (raw == null || raw.isEmpty) return {};
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) return {};
+    return decoded.map(
+      (key, value) => MapEntry(
+        key.toString(),
+        (value as Map).cast<String, dynamic>(),
+      ),
+    );
+  }
+
+  Future<void> _persistSecretJournal(
+    Map<String, Map<String, dynamic>> journal,
+  ) async {
+    if (journal.isEmpty) {
+      await _prefs.remove(_kPendingSecretTransactions);
+      if (_prefs.containsKey(_kPendingSecretTransactions)) {
+        throw StateError('AI secret transaction journal removal failed');
+      }
+      return;
+    }
+    final encoded = jsonEncode(journal);
+    final saved = await _prefs.setString(_kPendingSecretTransactions, encoded);
+    if (!saved || _prefs.getString(_kPendingSecretTransactions) != encoded) {
+      throw StateError('AI secret transaction journal persistence failed');
+    }
+  }
+
+  Future<T> _withJournalLock<T>(FutureOr<T> Function() action) async {
+    final previous = _journalTail;
+    final release = Completer<void>();
+    _journalTail = release.future;
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release.complete();
+    }
+  }
+
+  Future<T> _withMutationLock<T>(FutureOr<T> Function() action) async {
+    final previous = _mutationTail;
+    final release = Completer<void>();
+    _mutationTail = release.future;
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release.complete();
+    }
+  }
+
+  void _ensureProviderSecretReady(String providerId) {
+    if (_blockedProviderIds.contains(providerId)) {
+      throw StateError(
+        'AI provider secret transaction is still pending: $providerId',
+      );
+    }
+  }
+
+  void _ensureAllProviderSecretsReady() {
+    final pending = state
+        .map((provider) => provider.id)
+        .where(_blockedProviderIds.contains)
+        .toList(growable: false);
+    if (pending.isNotEmpty) {
+      throw StateError(
+        'AI provider secret transactions are still pending: '
+        '${pending.join(', ')}',
+      );
+    }
+  }
+
+  static Future<void> _removePreferenceKey(
+    SharedPreferences prefs,
+    String key,
+  ) async {
+    await prefs.remove(key);
+    if (prefs.containsKey(key)) {
+      throw StateError('SharedPreferences API Key cleanup failed: $key');
     }
   }
 }

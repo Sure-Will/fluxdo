@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fluxdo/services/storage/secret_store.dart';
@@ -14,7 +13,7 @@ void main() {
   });
 
   test('系统安全存储支持读写和删除', () async {
-    final store = SystemSecretStore(useSystemStorage: true);
+    final store = SystemSecretStore(migrateLocalPreferences: false);
     const key = SecretKey(namespace: 'test', name: 'secret');
 
     await store.write(key, 'value');
@@ -26,7 +25,7 @@ void main() {
 
   test('读取时自动迁移旧 SecureStorage Key', () async {
     FlutterSecureStorage.setMockInitialValues({'legacy_key': 'legacy-value'});
-    final store = SystemSecretStore(useSystemStorage: true);
+    final store = SystemSecretStore(migrateLocalPreferences: false);
     const key = SecretKey(
       namespace: 'test',
       name: 'secret',
@@ -41,7 +40,7 @@ void main() {
   });
 
   test('作用域清理不会影响其它账号', () async {
-    final store = SystemSecretStore(useSystemStorage: true);
+    final store = SystemSecretStore(migrateLocalPreferences: false);
     const alice = SecretKey(
       namespace: 'auth',
       name: 'token',
@@ -59,26 +58,55 @@ void main() {
     expect(await store.read(bob), 'b');
   });
 
-  test('macOS 本地模式不读取旧 Keychain，并跨实例持久化', () async {
-    debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-    addTearDown(() => debugDefaultTargetPlatformOverride = null);
-    FlutterSecureStorage.setMockInitialValues({'legacy_key': 'legacy-value'});
+  test('macOS 明文值验证迁入新 Keychain 后删除', () async {
     final preferences = await SharedPreferences.getInstance();
-    final store = SystemSecretStore(localPreferences: preferences);
-    const key = SecretKey(
-      namespace: 'test',
-      name: 'secret',
-      legacyKeys: ['legacy_key'],
+    const key = SecretKey(namespace: 'test', name: 'secret');
+    await preferences.setString(
+      '__local_secret__${key.storageKey}',
+      'local-value',
+    );
+    final store = SystemSecretStore(
+      localPreferences: preferences,
+      migrateLocalPreferences: true,
     );
 
-    expect(await store.read(key), isNull);
-    await store.write(key, 'local-value');
+    expect(await store.read(key), 'local-value');
+    expect(
+      preferences.containsKey('__local_secret__${key.storageKey}'),
+      isFalse,
+    );
 
-    final recreated = SystemSecretStore(localPreferences: preferences);
+    final recreated = SystemSecretStore(
+      localPreferences: preferences,
+      migrateLocalPreferences: true,
+    );
     expect(await recreated.read(key), 'local-value');
-
-    const keychain = FlutterSecureStorage();
-    expect(await keychain.read(key: 'legacy_key'), 'legacy-value');
-    expect(await keychain.read(key: key.storageKey), isNull);
   });
+
+  test('memoryOnly 凭据删除失败也必须向调用方报错', () async {
+    final store = SystemSecretStore(
+      secureStorage: const _DeleteFailingSecureStorage(),
+      migrateLocalPreferences: false,
+    );
+    const key = SecretKey.raw('legacy-token');
+
+    await expectLater(store.delete(key), throwsA(isA<SecretStoreException>()));
+  });
+}
+
+class _DeleteFailingSecureStorage extends FlutterSecureStorage {
+  const _DeleteFailingSecureStorage();
+
+  @override
+  Future<void> delete({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    throw StateError('simulated Keychain delete failure');
+  }
 }

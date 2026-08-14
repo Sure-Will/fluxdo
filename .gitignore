@@ -83,6 +83,10 @@ packages/enhanced_cookie_jar/pubspec.lock
 packages/extended_image_lite/pubspec.lock
 packages/pangutext/pubspec.lock
 packages/paper_shaders/pubspec.lock
+packages/native_animated_image/pubspec.lock
+
+# Local Android release signing credentials
+/android/key.properties
 
 # Firebase config (contains API keys)
 android/app/google-services.json

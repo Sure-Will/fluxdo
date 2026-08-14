@@ -8,11 +8,14 @@
 // （flutter_secure_storage）会把新构建当成新 app，反复弹授权窗。
 
 // 用法 1：自签代码签名证书（无需 Apple ID，推荐日常开发使用）。
-// 证书 leaf 稳定后钥匙串按证书授信，「始终允许」一次后 rebuild 不再弹窗。
+// 证书 leaf 稳定后钥匙串按稳定代码身份授信；FluxDO 使用新的版本化
+// Keychain service 避开旧 adhoc ACL，正常迁移无需再点「始终允许」。
 // 生成方式见 docs/development.md「macOS 代码签名」一节。
 // FLUXDO_APPLE_CODE_SIGN_IDENTITY_MACOSX = FluxDO Code Signing
 // FLUXDO_APPLE_CODE_SIGN_STYLE = Manual
 // FLUXDO_APPLE_CODE_SIGNING_ALLOWED = YES
+// FLUXDO_APPLE_CODE_SIGN_KEYCHAIN = /absolute/path/to/fluxdo-build.keychain-db
+// OTHER_CODE_SIGN_FLAGS = --keychain /absolute/path/to/fluxdo-build.keychain-db
 
 // 用法 2：有 Apple Team 时，填入 Team ID 正常签名（iOS 真机也用这个）
 // FLUXDO_APPLE_DEVELOPMENT_TEAM = YOUR_TEAM_ID

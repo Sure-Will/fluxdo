@@ -2,11 +2,16 @@ import 'dart:convert';
 
 import 'package:ai_model_manager/ai_model_manager.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() {
+    FlutterSecureStorage.setMockInitialValues({});
+  });
 
   group('AiProvider state', () {
     late SharedPreferences prefs;

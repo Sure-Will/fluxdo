@@ -182,7 +182,10 @@ class AiChatMessageItem extends StatelessWidget {
                   const SizedBox(height: 8),
               ],
               if (message.content.isNotEmpty)
-                MarkdownBody(data: '${message.content}${isStreaming ? ' ▊' : ''}'),
+                MarkdownBody(
+                  data: '${message.content}${isStreaming ? ' ▊' : ''}',
+                  selectionEnabled: isCompleted && !inSelectionMode,
+                ),
               // 纯文本流式开始时的小光标占位（图像生成走下面的 placeholder）
               if (message.content.isEmpty &&
                   isStreaming &&

@@ -81,5 +81,24 @@ void main() {
       expect(state.incomingTopics.keys, [11, 10, 12]);
       expect(cleared.incomingTopics.keys, [10, 12]);
     });
+
+    test('超量刷新只清除本次最新 50 条并保留其余积压', () {
+      var state = const TopicListIncomingState();
+      for (var id = 1; id <= 120; id++) {
+        state = state.recordIncoming(id, 1);
+      }
+
+      final snapshot = state.incomingRevisionSnapshotForCategory(
+        1,
+        limit: TopicListIncomingState.maxRefreshCount,
+      );
+      final cleared = state.clearSnapshot(snapshot);
+
+      expect(snapshot.keys, List<int>.generate(50, (index) => index + 71));
+      expect(
+        cleared.incomingTopics.keys,
+        List<int>.generate(70, (index) => index + 1),
+      );
+    });
   });
 }

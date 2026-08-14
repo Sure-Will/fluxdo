@@ -25,20 +25,20 @@ class ApkAsset {
   });
 
   Map<String, dynamic> toJson() => {
-        'downloadUrl': downloadUrl,
-        'sha256Url': sha256Url,
-        'architecture': architecture,
-        'size': size,
-        'name': name,
-      };
+    'downloadUrl': downloadUrl,
+    'sha256Url': sha256Url,
+    'architecture': architecture,
+    'size': size,
+    'name': name,
+  };
 
   factory ApkAsset.fromJson(Map<String, dynamic> json) => ApkAsset(
-        downloadUrl: json['downloadUrl'] as String,
-        sha256Url: json['sha256Url'] as String?,
-        architecture: json['architecture'] as String,
-        size: json['size'] as int,
-        name: json['name'] as String,
-      );
+    downloadUrl: json['downloadUrl'] as String,
+    sha256Url: json['sha256Url'] as String?,
+    architecture: json['architecture'] as String,
+    size: json['size'] as int,
+    name: json['name'] as String,
+  );
 }
 
 /// 更新信息模型
@@ -60,36 +60,39 @@ class UpdateInfo {
   });
 
   Map<String, dynamic> toJson() => {
-        'currentVersion': currentVersion,
-        'remoteVersion': remoteVersion,
-        'releaseUrl': releaseUrl,
-        'releaseNotes': releaseNotes,
-        'hasUpdate': hasUpdate,
-        'apkAssets': apkAssets.map((e) => e.toJson()).toList(),
-      };
+    'currentVersion': currentVersion,
+    'remoteVersion': remoteVersion,
+    'releaseUrl': releaseUrl,
+    'releaseNotes': releaseNotes,
+    'hasUpdate': hasUpdate,
+    'apkAssets': apkAssets.map((e) => e.toJson()).toList(),
+  };
 
   factory UpdateInfo.fromJson(Map<String, dynamic> json) => UpdateInfo(
-        currentVersion: json['currentVersion'] as String,
-        remoteVersion: json['remoteVersion'] as String,
-        releaseUrl: json['releaseUrl'] as String,
-        releaseNotes: json['releaseNotes'] as String,
-        hasUpdate: json['hasUpdate'] as bool,
-        apkAssets: (json['apkAssets'] as List<dynamic>?)
-                ?.map((e) => ApkAsset.fromJson(e as Map<String, dynamic>))
-                .toList() ??
-            [],
-      );
+    currentVersion: json['currentVersion'] as String,
+    remoteVersion: json['remoteVersion'] as String,
+    releaseUrl: json['releaseUrl'] as String,
+    releaseNotes: json['releaseNotes'] as String,
+    hasUpdate: json['hasUpdate'] as bool,
+    apkAssets:
+        (json['apkAssets'] as List<dynamic>?)
+            ?.map((e) => ApkAsset.fromJson(e as Map<String, dynamic>))
+            .toList() ??
+        [],
+  );
 }
 
 /// 应用更新检查服务
 class UpdateService {
-  static const String _repository = 'Lingyan000/fluxdo';
+  // 安装包升级必须留在同一签名通道。上游版本变化由 Sure fork 发版时
+  // 跟进；应用内不能下载 Lingyan000 的不同签名 APK 尝试覆盖安装。
+  static const String _repository = 'Sure-Will/fluxdo';
   static const String _apiUrl =
       'https://api.github.com/repos/$_repository/releases/latest';
   static const String _autoCheckUpdateKey = 'auto_check_update';
-  static const String _cacheKey = 'update_cache';
-  static const String _cacheTimeKey = 'update_cache_time';
-  static const String _etagKey = 'update_etag';
+  static const String _cacheKey = 'sure_update_cache_v1';
+  static const String _cacheTimeKey = 'sure_update_cache_time_v1';
+  static const String _etagKey = 'sure_update_etag_v1';
 
   // 缓存有效期（1 小时）
   static const Duration _cacheValidDuration = Duration(hours: 1);
@@ -98,8 +101,8 @@ class UpdateService {
   final SharedPreferences? _prefs;
 
   UpdateService({Dio? dio, SharedPreferences? prefs})
-      : _dio = dio ?? Dio(),
-        _prefs = prefs;
+    : _dio = dio ?? Dio(),
+      _prefs = prefs;
 
   /// 获取自动检查更新设置
   bool getAutoCheckUpdate() {
@@ -197,7 +200,7 @@ class UpdateService {
           headers: {
             'User-Agent': 'FluxDO-App',
             'Accept': 'application/vnd.github.v3+json',
-            if (storedEtag != null) 'If-None-Match': storedEtag,
+            'If-None-Match': ?storedEtag,
           },
           validateStatus: (status) =>
               status != null && (status == 200 || status == 304),
@@ -206,12 +209,16 @@ class UpdateService {
 
       // 304 Not Modified - 使用缓存
       if (response.statusCode == 304) {
-        final cachedInfo =
-            _getCachedUpdateInfo(currentVersion, ignoreExpiry: true);
+        final cachedInfo = _getCachedUpdateInfo(
+          currentVersion,
+          ignoreExpiry: true,
+        );
         if (cachedInfo != null) {
           // 更新缓存时间
           await _prefs?.setInt(
-              _cacheTimeKey, DateTime.now().millisecondsSinceEpoch);
+            _cacheTimeKey,
+            DateTime.now().millisecondsSinceEpoch,
+          );
           return cachedInfo;
         }
       }
@@ -232,8 +239,10 @@ class UpdateService {
     } on DioException catch (e) {
       // 403/429 速率限制时尝试使用缓存
       if (e.response?.statusCode == 403 || e.response?.statusCode == 429) {
-        final cachedInfo =
-            _getCachedUpdateInfo(currentVersion, ignoreExpiry: true);
+        final cachedInfo = _getCachedUpdateInfo(
+          currentVersion,
+          ignoreExpiry: true,
+        );
         if (cachedInfo != null) {
           return cachedInfo;
         }
@@ -244,8 +253,10 @@ class UpdateService {
   }
 
   /// 从缓存获取更新信息
-  UpdateInfo? _getCachedUpdateInfo(String currentVersion,
-      {bool ignoreExpiry = false}) {
+  UpdateInfo? _getCachedUpdateInfo(
+    String currentVersion, {
+    bool ignoreExpiry = false,
+  }) {
     if (_prefs == null) return null;
 
     final cacheJson = _prefs.getString(_cacheKey);
@@ -262,11 +273,13 @@ class UpdateService {
     }
 
     try {
-      final cached =
-          UpdateInfo.fromJson(jsonDecode(cacheJson) as Map<String, dynamic>);
+      final cached = UpdateInfo.fromJson(
+        jsonDecode(cacheJson) as Map<String, dynamic>,
+      );
 
       // 重新计算 hasUpdate（因为当前版本可能已变化）
-      final hasUpdate = _compareVersions(cached.remoteVersion, currentVersion) > 0;
+      final hasUpdate =
+          compareSureVersions(cached.remoteVersion, currentVersion) > 0;
 
       return UpdateInfo(
         currentVersion: currentVersion,
@@ -290,8 +303,11 @@ class UpdateService {
   }
 
   /// 解析更新信息
-  UpdateInfo _parseUpdateInfo(Map<String, dynamic> data, String currentVersion) {
-    final remoteVersion = (data['tag_name'] as String).replaceAll('v', '');
+  UpdateInfo _parseUpdateInfo(
+    Map<String, dynamic> data,
+    String currentVersion,
+  ) {
+    final remoteVersion = parseSureReleaseVersion(data['tag_name'] as String);
     final releaseUrl = data['html_url'] as String;
     var releaseNotes = data['body'] as String? ?? '';
 
@@ -303,7 +319,7 @@ class UpdateService {
       releaseNotes = releaseNotes.substring(0, markerIndex).trim();
     }
 
-    final hasUpdate = _compareVersions(remoteVersion, currentVersion) > 0;
+    final hasUpdate = compareSureVersions(remoteVersion, currentVersion) > 0;
 
     // 解析 APK 资源
     final assets = data['assets'] as List<dynamic>? ?? [];
@@ -343,13 +359,15 @@ class UpdateService {
       final architecture = _extractArchitecture(name);
       if (architecture == null) continue;
 
-      apkAssets.add(ApkAsset(
-        downloadUrl: asset['browser_download_url'] as String,
-        sha256Url: sha256Map[name],
-        architecture: architecture,
-        size: asset['size'] as int? ?? 0,
-        name: name,
-      ));
+      apkAssets.add(
+        ApkAsset(
+          downloadUrl: asset['browser_download_url'] as String,
+          sha256Url: sha256Map[name],
+          architecture: architecture,
+          size: asset['size'] as int? ?? 0,
+          name: name,
+        ),
+      );
     }
 
     return apkAssets;
@@ -379,22 +397,72 @@ class UpdateService {
 
     return null;
   }
+}
 
-  /// 比较两个版本号
-  ///
-  /// 返回值:
-  /// - 正数: v1 > v2
-  /// - 0: v1 == v2
-  /// - 负数: v1 < v2
-  int _compareVersions(String v1, String v2) {
-    final parts1 = v1.split('.').map(int.parse).toList();
-    final parts2 = v2.split('.').map(int.parse).toList();
+/// 比较两个 FluxDO 上游版本，只看 major.minor.patch。
+///
+/// Sure fork 使用 `0.2.26-sure.1+2026081416`：`sure.N` 是 fork 修订号，
+/// `+build` 是 Android 单调递增的内部版本码。检查原作者更新时，两者都不应
+/// 让同一个上游基线被误判为新版本。
+int compareUpstreamVersions(String v1, String v2) {
+  final parts1 = _upstreamVersionParts(v1);
+  final parts2 = _upstreamVersionParts(v2);
 
-    for (int i = 0; i < 3; i++) {
-      final p1 = i < parts1.length ? parts1[i] : 0;
-      final p2 = i < parts2.length ? parts2[i] : 0;
-      if (p1 != p2) return p1.compareTo(p2);
-    }
-    return 0;
+  for (var i = 0; i < 3; i++) {
+    if (parts1[i] != parts2[i]) return parts1[i].compareTo(parts2[i]);
   }
+  return 0;
+}
+
+/// 将 `sure-v0.2.26-r1` Release tag 转为应用版本 `0.2.26-sure.1`。
+String parseSureReleaseVersion(String tag) {
+  final match = RegExp(
+    r'^sure-v(\d+\.\d+\.\d+)-r(\d+)$',
+    caseSensitive: false,
+  ).firstMatch(tag.trim());
+  if (match == null) {
+    throw FormatException('无效的 Sure Release tag: $tag');
+  }
+  return '${match.group(1)}-sure.${match.group(2)}';
+}
+
+/// 比较 Sure fork 版本：先比较上游三段版本，再比较同基线的 sure 修订号。
+int compareSureVersions(String v1, String v2) {
+  final upstream = compareUpstreamVersions(v1, v2);
+  if (upstream != 0) return upstream;
+  return _sureRevision(v1).compareTo(_sureRevision(v2));
+}
+
+int _sureRevision(String version) {
+  final normalized = version.trim().split('+').first;
+  final match = RegExp(
+    r'-sure\.(\d+)$',
+    caseSensitive: false,
+  ).firstMatch(normalized);
+  return match == null ? 0 : int.parse(match.group(1)!);
+}
+
+List<int> _upstreamVersionParts(String version) {
+  final normalized = version.trim().replaceFirst(RegExp(r'^[vV]'), '');
+  final core = normalized.split('+').first.split('-').first;
+  final rawParts = core.split('.');
+  if (rawParts.isEmpty || rawParts.length > 3) {
+    throw FormatException('无效的 FluxDO 版本号: $version');
+  }
+
+  final parts = <int>[];
+  for (final rawPart in rawParts) {
+    if (rawPart.isEmpty) {
+      throw FormatException('无效的 FluxDO 版本号: $version');
+    }
+    final value = int.tryParse(rawPart);
+    if (value == null || value < 0) {
+      throw FormatException('无效的 FluxDO 版本号: $version');
+    }
+    parts.add(value);
+  }
+  while (parts.length < 3) {
+    parts.add(0);
+  }
+  return parts;
 }

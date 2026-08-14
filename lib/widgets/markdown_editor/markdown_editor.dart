@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:chat_bottom_container/chat_bottom_container.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -556,30 +557,53 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
     _isApplyingPangu = false;
   }
 
-  /// 自定义粘贴回调：优先粘贴图片，无图片时回退文本粘贴
-  void _handleCustomPaste(EditableTextState editableTextState) async {
-    editableTextState.hideToolbar();
-
-    final hasImage = await MarkdownToolbarState.clipboardHasImage();
-    if (hasImage) {
+  /// 统一粘贴事务：只读取一次系统剪贴板，图片优先，否则显式插入文本。
+  Future<void> _pasteClipboard() async {
+    try {
       final clipboard = SystemClipboard.instance;
-      if (clipboard != null) {
-        final reader = await clipboard.read();
-        final result = await MarkdownToolbarState.readImageFromReader(reader);
-        if (result != null) {
-          final (bytes, ext) = result;
-          final fileName =
-              'paste_${DateTime.now().millisecondsSinceEpoch}.$ext';
-          _toolbarKey.currentState?.uploadImageFromBytes(
-            bytes: bytes,
-            fileName: fileName,
-          );
+      if (clipboard == null) {
+        await _pasteFlutterClipboardText();
+        return;
+      }
+
+      final reader = await clipboard.read();
+      final image = await MarkdownToolbarState.readImageFromReader(reader);
+      if (image != null) {
+        final (bytes, ext) = image;
+        final fileName = 'paste_${DateTime.now().millisecondsSinceEpoch}.$ext';
+        if (!mounted) return;
+        await _toolbarKey.currentState?.uploadImageFromBytes(
+          bytes: bytes,
+          fileName: fileName,
+        );
+        return;
+      }
+
+      if (reader.canProvide(Formats.plainText)) {
+        final text = await reader.readValue(Formats.plainText);
+        if (text != null && mounted) {
+          _toolbarKey.currentState?.insertText(text);
           return;
         }
       }
+      await _pasteFlutterClipboardText();
+    } catch (_) {
+      // super_clipboard 不可用时回退 Flutter 文本剪贴板；仍保持串行。
+      await _pasteFlutterClipboardText();
     }
-    // 无图片，回退到默认文本粘贴
-    editableTextState.pasteText(SelectionChangedCause.toolbar);
+  }
+
+  Future<void> _pasteFlutterClipboardText() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text != null && mounted) {
+      _toolbarKey.currentState?.insertText(text);
+    }
+  }
+
+  void _handleCustomPaste(EditableTextState editableTextState) {
+    editableTextState.hideToolbar();
+    unawaited(_pasteClipboard());
   }
 
   /// 自定义上下文菜单：替换粘贴按钮以支持图片粘贴
@@ -910,6 +934,7 @@ class MarkdownEditorState extends ConsumerState<MarkdownEditor> {
             isEmojiPanelVisible: showEmojiPanel,
             // 桌面端表情按钮由弹层锚点包裹(跟随定位 + toggle 无闪烁)
             emojiPopover: _emojiPopover,
+            onPaste: _pasteClipboard,
             // 桌面端空间充足，显示全部工具，不启用网格面板
             onToggleTools: _isDesktop
                 ? null

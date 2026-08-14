@@ -98,6 +98,7 @@ just release -- patch --dry-run
 ## 平台约定
 
 - Android 只有在 `android/key.properties` 和 keystore 都完整可用时才使用本地签名
+- 自动化发版也可不落盘 `key.properties`，改用 `FLUXDO_ANDROID_STORE_FILE`、`FLUXDO_ANDROID_STORE_PASSWORD`、`FLUXDO_ANDROID_KEY_ALIAS` 和 `FLUXDO_ANDROID_KEY_PASSWORD` 环境变量；同名文件配置优先。正式发版必须同时设置 `FLUXDO_REQUIRE_RELEASE_SIGNING=true`，配置缺失时直接终止构建，禁止静默回退 debug 签名
 - 当本地签名材料完整时，`debug/profile/release` 都会使用本地签名
 - 当本地签名材料缺失时，`debug` 使用默认 debug signing，`profile/release` 自动回退到 debug signing
 - Android 构建会优先使用 Android Studio 自带 JBR；如需手动指定，可设置 `FLUXDO_ANDROID_JAVA_HOME`
@@ -133,6 +134,6 @@ security add-trusted-cert -p codeSign -r trustRoot \
 security find-identity -v -p codesigning   # 应列出 "FluxDO Code Signing"
 ```
 
-然后在 `apple/Local.xcconfig` 中启用（见 example 文件的「用法 1」）。切换后首次启动钥匙串还会弹最后一次（旧 ACL 只认 adhoc 旧构建），点「始终允许」后 rebuild 不再弹。
+然后在 `apple/Local.xcconfig` 中启用（见 example 文件的「用法 1」）。应用凭据使用独立、版本化的 Keychain service，不读取旧 adhoc ACL 对应的默认 service；过渡期 SharedPreferences 明文会在新 service 写入并读回核验后删除，因此正常迁移不需要点击旧钥匙串授权框。后续 rebuild 必须继续使用同一张证书。
 
 CI 发版使用同一张证书：把 p12 的 base64 与密码配置为仓库 secrets `MACOS_CODESIGN_P12_BASE64` / `MACOS_CODESIGN_P12_PASSWORD`（见 `.github/workflows/build.yaml` 的 "Setup macOS code signing" 步骤）。secrets 缺失时（如 fork）自动回退 adhoc 签名，构建不会失败。自签证书不等于公证，用户下载 DMG 后仍需右键打开或 `xattr -cr` 解除隔离，与 adhoc 时代一致。

@@ -295,9 +295,12 @@ class TopicListNotifier extends AsyncNotifier<List<Topic>>
 
     // 移除列表中已存在的同 ID 话题（刷新重复项，与网页版 removeValuesFromArray 一致）
     final newTopicIds = newTopics.map((t) => t.id).toSet();
-    final remaining = currentTopics.where((t) => !newTopicIds.contains(t.id)).toList();
-    // 将新话题全部插入列表顶部
-    state = AsyncValue.data([...newTopics, ...remaining]);
+    final remaining = currentTopics
+        .where((t) => !newTopicIds.contains(t.id))
+        .toList();
+    // 多批积压按活跃时间稳定归并。否则第二批较旧话题会无条件插到
+    // 第一批较新话题上方，连续刷新后 latest 顺序反转。
+    state = AsyncValue.data(mergeLatestTopicRefresh(newTopics, remaining));
     return newTopics.map((t) => t.id).toList();
   }
 
@@ -443,7 +446,10 @@ class TopicListNotifier extends AsyncNotifier<List<Topic>>
       final tracked = tracking[topic.id];
       if (tracked == null) continue;
 
-      final highest = math.max(tracked.highestPostNumber, topic.highestPostNumber);
+      final highest = math.max(
+        tracked.highestPostNumber,
+        topic.highestPostNumber,
+      );
       final trackedLastRead = tracked.lastReadPostNumber;
       final topicLastRead = topic.lastReadPostNumber;
       final lastRead = trackedLastRead == null
@@ -454,7 +460,9 @@ class TopicListNotifier extends AsyncNotifier<List<Topic>>
 
       // 未读数口径对齐服务端 lib/unread.rb:没读过的话题 unread 恒为 0
       // (它走 unseen/NEW 语义,不走未读计数)
-      final newUnread = lastRead == null ? 0 : (highest - lastRead).clamp(0, highest);
+      final newUnread = lastRead == null
+          ? 0
+          : (highest - lastRead).clamp(0, highest);
       // 对齐网页版 updateTopics 的 unseen 回写:读过或已被忽略
       // (dismiss_new 置 isSeen)都不再算新话题
       final newUnseen = lastRead == null && !tracked.isSeen && topic.unseen;
@@ -541,6 +549,38 @@ class TopicListNotifier extends AsyncNotifier<List<Topic>>
     );
     state = AsyncValue.data(newList);
   }
+}
+
+/// 将增量刷新的话题与当前 latest 列表稳定归并。
+///
+/// 置顶话题保持在最前，其余按最近回复时间倒序；时间相同或缺失时保留
+/// API/当前列表的相对顺序，避免无意义的卡片跳动。
+@visibleForTesting
+List<Topic> mergeLatestTopicRefresh(
+  List<Topic> refreshed,
+  List<Topic> current,
+) {
+  final indexed = <({Topic topic, int index})>[];
+  for (final topic in [...refreshed, ...current]) {
+    indexed.add((topic: topic, index: indexed.length));
+  }
+  indexed.sort((left, right) {
+    if (left.topic.pinned != right.topic.pinned) {
+      return left.topic.pinned ? -1 : 1;
+    }
+    final leftTime = left.topic.lastPostedAt ?? left.topic.createdAt;
+    final rightTime = right.topic.lastPostedAt ?? right.topic.createdAt;
+    if (leftTime != null && rightTime != null) {
+      final byTime = rightTime.compareTo(leftTime);
+      if (byTime != 0) return byTime;
+    } else if (leftTime != null) {
+      return -1;
+    } else if (rightTime != null) {
+      return 1;
+    }
+    return left.index.compareTo(right.index);
+  });
+  return indexed.map((entry) => entry.topic).toList(growable: false);
 }
 
 final topicListProvider =

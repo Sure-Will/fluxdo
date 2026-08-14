@@ -4,6 +4,7 @@ import 'package:m3e_ui/m3e_ui.dart';
 import '../../services/discourse/discourse_service.dart';
 import '../../services/discourse_cache_manager.dart';
 import '../../pages/image_viewer_page.dart';
+import '../common/page_aware_image.dart';
 import 'svg_view.dart';
 
 /// Discourse 图片组件
@@ -161,17 +162,20 @@ class _DiscourseImageState extends State<DiscourseImage> {
   /// 动图渲染 — 走 native_animated_image (Rust pipeline),不踩 Flutter Skia
   /// multi_frame_codec 的 #85831 / #94205 bug。
   Widget _buildNativeAnimatedImage(ThemeData theme) {
-    return Image(
-      image: discourseImageProvider(_resolvedUrl!),
-      width: widget.width,
-      height: widget.height,
-      fit: widget.fit,
-      gaplessPlayback: true,
-      frameBuilder: (context, displayChild, frame, wasSynchronouslyLoaded) {
-        if (wasSynchronouslyLoaded || frame != null) return displayChild;
-        return _buildPlaceholder(theme);
-      },
-      errorBuilder: (context, error, stack) => _buildErrorWidget(theme),
+    return PageAwareImage(
+      inactiveBuilder: (_) => _buildPlaceholder(theme),
+      builder: (_) => Image(
+        image: discourseImageProvider(_resolvedUrl!),
+        width: widget.width,
+        height: widget.height,
+        fit: widget.fit,
+        gaplessPlayback: true,
+        frameBuilder: (context, displayChild, frame, wasSynchronouslyLoaded) {
+          if (wasSynchronouslyLoaded || frame != null) return displayChild;
+          return _buildPlaceholder(theme);
+        },
+        errorBuilder: (context, error, stack) => _buildErrorWidget(theme),
+      ),
     );
   }
 

@@ -28,12 +28,16 @@ class AppMemoryPolicy {
     );
   }
 
-  /// 只有前台可交互且确为当前页时才允许 ticker 驱动新帧。
+  /// 当前页在桌面端短暂 inactive 时保持挂载，避免点菜单、系统弹窗或切到
+  /// 其它应用的一瞬间把可见图片全部换成占位。长期动图释放由
+  /// AnimationMemoryLifecycle 的延迟策略处理；真正 hidden/paused 时立即停。
   static bool shouldEnablePageTickers({
     required AppLifecycleState lifecycleState,
     required bool isActivePage,
   }) {
-    return isActivePage && lifecycleState == AppLifecycleState.resumed;
+    return isActivePage &&
+        (lifecycleState == AppLifecycleState.resumed ||
+            lifecycleState == AppLifecycleState.inactive);
   }
 }
 
@@ -51,12 +55,15 @@ class AppPageTickerGate extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return TickerMode(
-      enabled: AppMemoryPolicy.shouldEnablePageTickers(
-        lifecycleState: lifecycleState,
-        isActivePage: isActivePage,
+    return ExcludeFocus(
+      excluding: !isActivePage,
+      child: TickerMode(
+        enabled: AppMemoryPolicy.shouldEnablePageTickers(
+          lifecycleState: lifecycleState,
+          isActivePage: isActivePage,
+        ),
+        child: child,
       ),
-      child: child,
     );
   }
 }

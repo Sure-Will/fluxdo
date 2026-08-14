@@ -1,5 +1,24 @@
 # 发版与 iOS IPA
 
+## Sure fork 版本约定
+
+Sure fork 的用户可见版本以原作者最新正式版为基线，再追加独立修订号：
+
+```text
+<上游版本>-sure.<修订号>+<YYYYMMDDHH>
+```
+
+例如 `0.2.26-sure.1+2026081416`：
+
+- `0.2.26` 与原作者最新正式版一致
+- `sure.1` 表示基于该上游版本的第 1 个 Sure 修订版；同一基线依次递增，上游升级后从 1 重新开始
+- `YYYYMMDDHH` 是 Flutter build number 和 Android versionCode，只能单调递增，不能随上游版本重置
+- Git tag 使用 `sure-v0.2.26-r1`，避免与原作者 `v*` tag 冲突，也避免触发上游全平台发布工作流
+
+Sure fork 的应用内安装包更新只检查 `Sure-Will/fluxdo` Release，避免 Android 下载不同签名的原作者 APK 后安装失败。比较时先看三段上游版本，再看同一基线下的 `sure.N`，忽略 build number；原作者更新日志由每次 Sure Release 正文链接提供。
+
+macOS Release 必须使用同一张 `FluxDO Code Signing` 稳定自签证书，不能回退 adhoc 后继续发布。发布门禁需确认产物 `Authority`、designated requirement 与已记录证书一致；加密 P12 和密码必须分开备份。该证书只解决稳定应用身份与 Keychain ACL，不等同于 Apple Developer ID 或公证。
+
 ## 版本亮点(stable 发版前)
 
 stable 版本的发布日志正文取自 `highlights/v<版本>.md`(用户视角亮点),GitHub Release 会把全量

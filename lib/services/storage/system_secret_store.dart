@@ -6,9 +6,9 @@ import 'secret_store.dart';
 
 /// 基于系统 Keychain / Keystore / Credential Store 的统一敏感数据存储。
 ///
-/// macOS 例外：adhoc 签名每次构建都会改变代码身份，导致系统钥匙串反复
-/// 请求授权。macOS 因此改用应用自己的 SharedPreferences，不读取、迁移或
-/// 删除 Keychain 中的旧凭证。该平台的凭证会持久化，但不再由钥匙串加密。
+/// macOS 使用稳定自签身份和独立 Keychain service。旧 adhoc 构建写入的
+/// 默认 service 不会被访问，避免触发旧 ACL 授权框；过渡期写入
+/// SharedPreferences 的明文值会在首次读取时验证迁入 Keychain 后删除。
 ///
 /// 默认严格失败，不写入明文 SharedPreferences。确实允许可用性降级的数据
 /// 可在 [SecretKey] 上声明 [SecretFallbackPolicy.memoryOnly]，降级内容只在
@@ -17,37 +17,40 @@ class SystemSecretStore implements SecretStore {
   SystemSecretStore({
     FlutterSecureStorage? secureStorage,
     SharedPreferences? localPreferences,
-    bool? useSystemStorage,
+    bool? migrateLocalPreferences,
   }) : _secureStorage =
            secureStorage ??
            const FlutterSecureStorage(
-             mOptions: MacOsOptions(usesDataProtectionKeychain: false),
+             mOptions: MacOsOptions(
+               accountName: _macOsKeychainService,
+               usesDataProtectionKeychain: false,
+             ),
            ),
        _localPreferences = localPreferences,
-       _useSystemStorage =
-           useSystemStorage ??
-           (kIsWeb || defaultTargetPlatform != TargetPlatform.macOS);
+       _migrateLocalPreferences =
+           migrateLocalPreferences ??
+           (!kIsWeb && defaultTargetPlatform == TargetPlatform.macOS);
 
   static final SystemSecretStore instance = SystemSecretStore();
+  static const _macOsKeychainService = 'com.surewill.fluxdo.secrets.v1';
   static const _localStoragePrefix = '__local_secret__';
 
   final FlutterSecureStorage _secureStorage;
   final SharedPreferences? _localPreferences;
-  final bool _useSystemStorage;
+  final bool _migrateLocalPreferences;
   final Map<String, String> _memoryFallback = {};
 
   @override
   Future<String?> read(SecretKey key) async {
-    if (!_useSystemStorage) {
-      final preferences = await _preferences;
-      return preferences.getString(_localStorageKey(key.storageKey));
-    }
     try {
       final value = await _secureStorage.read(key: key.storageKey);
       if (value != null) {
         _memoryFallback.remove(key.storageKey);
+        await _removeLocalValue(key.storageKey);
         return value;
       }
+      final localValue = await _migrateLocalValue(key);
+      if (localValue != null) return localValue;
       final migrated = await _migrateLegacyValue(key);
       return migrated ?? _memoryFallback[key.storageKey];
     } catch (error) {
@@ -57,13 +60,9 @@ class SystemSecretStore implements SecretStore {
 
   @override
   Future<void> write(SecretKey key, String value) async {
-    if (!_useSystemStorage) {
-      final preferences = await _preferences;
-      await preferences.setString(_localStorageKey(key.storageKey), value);
-      return;
-    }
     try {
       await _secureStorage.write(key: key.storageKey, value: value);
+      await _removeLocalValue(key.storageKey);
       _memoryFallback.remove(key.storageKey);
     } catch (error) {
       if (key.fallbackPolicy == SecretFallbackPolicy.memoryOnly) {
@@ -78,24 +77,18 @@ class SystemSecretStore implements SecretStore {
   @override
   Future<void> delete(SecretKey key) async {
     _memoryFallback.remove(key.storageKey);
-    if (!_useSystemStorage) {
-      final preferences = await _preferences;
-      await preferences.remove(_localStorageKey(key.storageKey));
-      for (final legacyKey in key.legacyKeys) {
-        await preferences.remove(_localStorageKey(legacyKey));
-      }
-      return;
-    }
     try {
+      await _removeLocalValue(key.storageKey);
+      for (final legacyKey in key.legacyKeys) {
+        await _removeLocalValue(legacyKey);
+      }
       await _secureStorage.delete(key: key.storageKey);
       for (final legacyKey in key.legacyKeys) {
         await _secureStorage.delete(key: legacyKey);
       }
     } catch (error) {
-      if (key.fallbackPolicy == SecretFallbackPolicy.memoryOnly) {
-        _logMemoryFallback('delete', key, error);
-        return;
-      }
+      // 删除不能沿用 memoryOnly 的“可用性优先”语义。系统安全存储若未删掉，
+      // 必须把失败传给注销/清理调用方，否则旧凭据会在后续 read 时重新出现。
       throw _exception('delete', key, error);
     }
   }
@@ -105,17 +98,8 @@ class SystemSecretStore implements SecretStore {
     _memoryFallback.removeWhere(
       (key, _) => key.startsWith(scope.storagePrefix),
     );
-    if (!_useSystemStorage) {
-      final preferences = await _preferences;
-      final prefix = _localStorageKey(scope.storagePrefix);
-      final keys = preferences
-          .getKeys()
-          .where((key) => key.startsWith(prefix))
-          .toList(growable: false);
-      await Future.wait(keys.map(preferences.remove));
-      return;
-    }
     try {
+      await _removeLocalScope(scope.storagePrefix);
       final values = await _secureStorage.readAll();
       for (final key in values.keys.toList(growable: false)) {
         if (key.startsWith(scope.storagePrefix)) {
@@ -133,10 +117,6 @@ class SystemSecretStore implements SecretStore {
 
   @override
   Future<SecretStoreAvailability> checkAvailability() async {
-    if (!_useSystemStorage) {
-      await _preferences;
-      return SecretStoreAvailability.available;
-    }
     try {
       await _secureStorage.read(key: 'fluxdo:system:device:availability_probe');
       return SecretStoreAvailability.available;
@@ -149,6 +129,54 @@ class SystemSecretStore implements SecretStore {
       _localPreferences ?? SharedPreferences.getInstance();
 
   String _localStorageKey(String key) => '$_localStoragePrefix$key';
+
+  Future<String?> _migrateLocalValue(SecretKey key) async {
+    if (!_migrateLocalPreferences) return null;
+    final preferences = await _preferences;
+    final localKey = _localStorageKey(key.storageKey);
+    final value = preferences.getString(localKey);
+    if (value == null) return null;
+
+    await _secureStorage.write(key: key.storageKey, value: value);
+    final verified = await _secureStorage.read(key: key.storageKey);
+    if (verified != value) {
+      throw StateError('Keychain migration verification failed');
+    }
+    await _removePreferenceValueVerified(preferences, localKey);
+    return verified;
+  }
+
+  Future<void> _removeLocalValue(String storageKey) async {
+    if (!_migrateLocalPreferences) return;
+    final preferences = await _preferences;
+    await _removePreferenceValueVerified(
+      preferences,
+      _localStorageKey(storageKey),
+    );
+  }
+
+  Future<void> _removeLocalScope(String storagePrefix) async {
+    if (!_migrateLocalPreferences) return;
+    final preferences = await _preferences;
+    final prefix = _localStorageKey(storagePrefix);
+    final keys = preferences
+        .getKeys()
+        .where((key) => key.startsWith(prefix))
+        .toList(growable: false);
+    for (final key in keys) {
+      await _removePreferenceValueVerified(preferences, key);
+    }
+  }
+
+  Future<void> _removePreferenceValueVerified(
+    SharedPreferences preferences,
+    String key,
+  ) async {
+    await preferences.remove(key);
+    if (preferences.containsKey(key)) {
+      throw StateError('SharedPreferences secret cleanup failed: $key');
+    }
+  }
 
   Future<String?> _migrateLegacyValue(SecretKey key) async {
     for (final legacyKey in key.legacyKeys) {

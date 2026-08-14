@@ -417,7 +417,7 @@ class _ChatChannelPageState extends ConsumerState<ChatChannelPage>
               padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
               // 总结是 AI 生成的 markdown(含 /t/-/... 消息链接),
               // cook 后走新引擎渲染,链接可点
-              child: MarkdownBody(data: summary),
+              child: MarkdownBody(data: summary, selectionEnabled: true),
             );
           },
         ),
@@ -1405,4 +1405,3 @@ class _ChatChannelPageState extends ConsumerState<ChatChannelPage>
     return a.year == b.year && a.month == b.month && a.day == b.day;
   }
 }
-

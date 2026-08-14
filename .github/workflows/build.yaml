@@ -493,7 +493,7 @@ jobs:
       # fork 首次发稳定版时本仓库可能尚未推送上一版 tag。补齐上游 tag，
       # 让 CHANGELOG 仍能以真正的上一稳定版为基线，而不是从整个历史开始。
       - name: Fetch upstream release tags
-        run: git fetch --tags https://github.com/Lingyan000/fluxdo.git || true
+        run: git fetch --tags https://github.com/Lingyan000/fluxdo.git
 
       - name: Install git-cliff
         uses: taiki-e/install-action@v2
@@ -573,7 +573,7 @@ jobs:
 
       # 同步 changelog job 的 tag 基线，避免 fork 的首次稳定版生成全量历史。
       - name: Fetch upstream release tags
-        run: git fetch --tags https://github.com/Lingyan000/fluxdo.git || true
+        run: git fetch --tags https://github.com/Lingyan000/fluxdo.git
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4

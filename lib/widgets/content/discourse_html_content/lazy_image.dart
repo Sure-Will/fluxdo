@@ -9,6 +9,7 @@ import '../../../utils/image_paint_gate.dart';
 import '../../common/anchor_guard_sliver.dart';
 import '../../common/first_paint_probe.dart';
 import '../../common/hero_image.dart';
+import '../../common/page_aware_image.dart';
 import '../svg_view.dart';
 
 /// 帖子正文内容图组件:固定占位尺寸 + 解码分辨率约束 + 重绘隔离 + Hero。
@@ -135,7 +136,13 @@ class _LazyImageState extends State<LazyImage> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _resolveRatioIfNeeded();
+    if (TickerMode.valuesOf(context).enabled) {
+      _resolveRatioIfNeeded();
+    } else {
+      // 隐藏的 IndexedStack 页面不应让比例监听继续持有 ImageStream。
+      _stopRatioResolve();
+      _cancelGateWait();
+    }
   }
 
   @override
@@ -147,7 +154,9 @@ class _LazyImageState extends State<LazyImage> {
       // 换图(列表 item 复用同位置 State):新图重新过首绘闸门
       _cancelGateWait();
       _paintAdmitted = false;
-      _resolveRatioIfNeeded();
+      if (TickerMode.valuesOf(context).enabled) {
+        _resolveRatioIfNeeded();
+      }
     }
   }
 
@@ -177,9 +186,7 @@ class _LazyImageState extends State<LazyImage> {
     final stream = ScrollAwareImageProvider(
       context: _scrollAwareContext,
       imageProvider: _buildProvider(context),
-    ).resolve(
-      createLocalImageConfiguration(context),
-    );
+    ).resolve(createLocalImageConfiguration(context));
     void onImage(ImageInfo info, bool synchronousCall) {
       final imgW = info.image.width.toDouble();
       final imgH = info.image.height.toDouble();
@@ -230,9 +237,7 @@ class _LazyImageState extends State<LazyImage> {
   void _handleGateAdmitted() {
     _gateWaiter = null;
     if (!mounted) return;
-    FrameJankMonitor.noteBuild(
-      'img+${(widget.width ?? 0).round()}w',
-    );
+    FrameJankMonitor.noteBuild('img+${(widget.width ?? 0).round()}w');
     setState(() => _paintAdmitted = true);
   }
 
@@ -252,14 +257,20 @@ class _LazyImageState extends State<LazyImage> {
     // 显示宽拿到的是**声明宽**(手机原图 3000px+),不 cap 就全尺寸
     // 解码(×dpr = 6000px 位图,单张几十 MB,网格滚动/交互卡顿主因);
     // 屏宽解码对任何在屏显示都足够,查看器高清走独立路径。
-    final logicalWidth =
-        (widget.decodeWidth ?? widget.width ?? screenW).clamp(1.0, screenW);
+    final logicalWidth = (widget.decodeWidth ?? widget.width ?? screenW).clamp(
+      1.0,
+      screenW,
+    );
     final cacheWidth = (logicalWidth * dpr).round().clamp(1, 1 << 16);
     // 登记解码参数:查看器缩略图占位按同参重建 provider → 同 key 命中
     // ImageCache,Hero 转场帧零重解码。
     final key = widget.cacheKey;
     if (key != null && key.isNotEmpty) {
-      ImageDecodeSpecMemo.remember(key, cacheWidth, LazyImage._kMaxDecodeHeight);
+      ImageDecodeSpecMemo.remember(
+        key,
+        cacheWidth,
+        LazyImage._kMaxDecodeHeight,
+      );
     }
     return ResizeImage(
       widget.imageProvider,
@@ -311,11 +322,7 @@ class _LazyImageState extends State<LazyImage> {
           // 首字节前无进度 = 不定态用 LoadingSpinner;有进度走 wavy 圆环
           child: progress == null
               ? const LoadingSpinner(size: 24)
-              : M3eCircularProgress(
-                  value: progress,
-                  size: 24,
-                  strokeWidth: 2,
-                ),
+              : M3eCircularProgress(value: progress, size: 24, strokeWidth: 2),
         ),
       );
     }
@@ -359,7 +366,8 @@ class _LazyImageState extends State<LazyImage> {
         if (loadingProgress == null) return child;
         if (loadingProgress.expectedTotalBytes == null) return child;
         return placeholderBox(
-          progress: loadingProgress.cumulativeBytesLoaded /
+          progress:
+              loadingProgress.cumulativeBytesLoaded /
               loadingProgress.expectedTotalBytes!,
         );
       },
@@ -396,6 +404,11 @@ class _LazyImageState extends State<LazyImage> {
       },
     );
 
+    final pageAwareImage = PageAwareImage(
+      inactiveBuilder: (_) => placeholderBox(),
+      builder: (_) => imageChild,
+    );
+
     // 使用 HeroImage 封装 Hero 动画及可见性控制
     Widget imageWidget = HeroImage(
       heroTag: widget.heroTag,
@@ -405,7 +418,7 @@ class _LazyImageState extends State<LazyImage> {
       coverFlight: widget.coverFlight,
       flightImage: widget.coverFlight ? _buildProvider(context) : null,
       flightRadius: widget.flightRadius,
-      child: imageChild,
+      child: pageAwareImage,
     );
 
     // 视野优先级:cacheExtent 预建区的 cell 会 build/layout 但不 paint,
@@ -424,10 +437,7 @@ class _LazyImageState extends State<LazyImage> {
     imageWidget = RepaintBoundary(child: imageWidget);
 
     if (hasFixedBox) {
-      return AspectRatio(
-        aspectRatio: width / height,
-        child: imageWidget,
-      );
+      return AspectRatio(aspectRatio: width / height, child: imageWidget);
     }
 
     // 无声明尺寸:有实测/记忆比例就以其占位 —— 重访(回收后重建)首帧

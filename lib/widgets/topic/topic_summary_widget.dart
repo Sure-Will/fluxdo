@@ -388,6 +388,7 @@ class _StreamingMarkdownBodyState extends State<_StreamingMarkdownBody> {
     final cursor = widget.isStreaming && _cursorVisible ? ' ▍' : '';
     return MarkdownBody(
       data: '$_displayedText$cursor',
+      selectionEnabled: !widget.isStreaming,
       onInternalLinkTap: widget.onInternalLinkTap,
     );
   }
